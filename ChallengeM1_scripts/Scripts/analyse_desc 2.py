@@ -8,15 +8,14 @@ from pandas.plotting import lag_plot
 
 
 Data0 = pd.read_csv(
-    "Data/train.csv",
+    "../Data/train.csv",
     parse_dates=["Date"]
 )
 Data1 = pd.read_csv(
-    "Data/test.csv",
+    "../Data/test.csv",
     parse_dates=["Date"]
 )
 
-""""
 # Basic descriptions
 Data0.describe()
 Data0["Date"].min(), Data0["Date"].max()
@@ -114,7 +113,7 @@ Data0["Load.1"].corr(Data0["Load"])
 lags = 7 * 10
 acf_vals = acf(Data0["Load"], nlags=lags, fft=True)
 
-plt.stem(range(len(acf_vals)), acf_vals, use_line_collection=True)
+plt.stem(range(len(acf_vals)), acf_vals)
 plt.ylim(0, 1)
 plt.show()
 
@@ -183,5 +182,3 @@ plt.hist(Data0["Temp"], bins=50, alpha=0.6, label="Train")
 plt.hist(Data1["Temp"], bins=50, alpha=0.5, label="Test")
 plt.legend()
 plt.show()
-
-"""
