@@ -7,7 +7,8 @@ import numpy as np
 # TODO: use these loss functions, espacially rmse, mape and piball_loss
 
 class LinearRegression:
-    def __init__(self, loss_function = None, learning_rate=0.02, maxIter=1000):
+    """Linear model"""
+    def __init__(self, loss_function = None, learning_rate=0.01, maxIter=1000):
         self.loss_function = loss_function
         # use score.py for loss functions
         self.learning_rate = learning_rate
@@ -32,32 +33,39 @@ class LinearRegression:
 
     def fit(self, X, y):
         """
-        Fitting the model
+        Fitting the model returning the errorn, the weights, and f
         """
-        X = self.__ones_trick(X)
+        # X = self.__ones_trick(X)
         N, nb_param = X.shape
-
+        Err = []
+        F = []
         # wieghts init
-        # self.bias = 0 # No need with ones trick
-        self.weights = np.random.rand(nb_param)
+        self.bias = 0 # No need with ones trick
+        self.weights = np.zeros(nb_param)
 
         for i in range(self.maxIter):
-            y_pred = np.dot(X, self.weights) # + self.bias 
+            Y_pred = np.dot(X, self.weights) + self.bias 
+            error = y - Y_pred
+            # rmse
+            mse = np.mean(error**2)
+            rmse = np.sqrt(mse)
+            
+            # Adding a small epsilon (1e-8) to avoid division by zero
+            grad = -(1 / (N * (rmse + 1e-8))) * (X.T @ error)
 
-            grad = -2/N * np.dot(X.T, (y-y_pred)) #MSE
-            # TODO: add general function
+            self.weights -= self.learning_rate * grad
+            self.bias -= self.learning_rate * (-2 * np.mean(error) / (rmse + 1e-8))
 
-            self.weights -= self.learning_rate * grad 
-            # self.bias -= self.learning_rate * np.mean(-2*(y-y_pred))
+            Err.append(rmse)
+            F.append(np.dot(X, self.weights) + self.bias)
 
-        return self
+        return Err, F, self.weights
     
     def predict(self, X):
         """
         Predicting
         """
-        X = self.__ones_trick(X)
-        return np.dot(X, self.weights) # + self.bias
+        return np.dot(X, self.weights) + self.bias
     
 
 
