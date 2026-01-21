@@ -51,7 +51,7 @@ class LinearRegression:
             rmse = np.sqrt(np.mean(error**2))
             self.errors.append(rmse)
             
-            if rmse < 1e-6:
+            if rmse < 1e-8:
                 break
 
         return self
