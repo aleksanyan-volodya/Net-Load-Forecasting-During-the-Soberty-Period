@@ -48,3 +48,11 @@ Data fields
     Holiday_zone_b -school holidays period for zone b
     Holiday_zone_c -school holidays period for zone c
     BH_Holiday -bank holidays during holidays
+
+## Week 1:
+...
+
+
+## Week 2:
+    Nous allons utiliser pinball loss. 
+    On va chercher l'argmin par rapport à q de la médiande de loss. E[loss(Y-q)]
