@@ -1,8 +1,4 @@
 # Base model : Linear Regression from scratch
-
-from sklearn.metrics import mean_pinball_loss
-
-
 import numpy as np
 
 # import the score.py file from ../Python for loss functions
