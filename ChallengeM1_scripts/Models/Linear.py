@@ -59,20 +59,19 @@ class LinearRegression:
             elif (loss == "pinball"):
                 # Pinball loss at quantile tau:
                 # loss(y, y_hat) = max(tau*(y - y_hat), (tau-1)*(y - y_hat))
-                # With error = y_hat - y, this is max((1-tau)*error, tau*(-error))
+                # With residual r = y - y_hat, this is max(tau*r, (tau-1)*r)
                 # Subgradient wrt y_hat:
-                #   if y_hat > y: (1 - tau)
-                #   else:         (-tau)
+                #   if r > 0  (y_hat < y):  dL/dy_hat = -tau
+                #   if r < 0  (y_hat > y):  dL/dy_hat = 1 - tau
                 # (at equality, any value in [-tau, 1-tau] is a valid subgradient)
-                indicator = (y_pred > y).astype(float) 
+                r = y - y_pred
+                grad_factor = (r < 0).astype(float) - self.tau
                 
-                # Le terme de gradient est (Indicator - tau)
-                # Si surestimation : (1 - tau)
-                # Si sous-estimation : (0 - tau) = -tau
-                grad_factor = indicator - self.tau
-                
-                grad_w = (1 / N) * (X.T @ grad_factor)
-                grad_b = (1 / N) * np.sum(grad_factor)
+                # IMPORTANT: use the subgradient of the SUM pinball loss here (no /N),
+                # to keep step magnitudes comparable to the existing RMSE setting
+                # without changing the learning rate.
+                grad_w = (X.T @ grad_factor)
+                grad_b = np.sum(grad_factor)
 
                 self.weights -= self.learning_rate * grad_w
                 self.bias -= self.learning_rate * grad_b
