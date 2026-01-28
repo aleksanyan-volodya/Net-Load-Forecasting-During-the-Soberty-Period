@@ -28,7 +28,7 @@ class LinearRegression:
     #     """
     #     return -2/N * np.dot(X.T, (y-y_pred)), -2 * np.mean()
 
-    def fit(self, X, y, loss="rmse"):
+    def fit(self, X, y, loss="rmse", verbose=False, log_every=500):
         """
         Fitting the model returning the errors, the weights, and f
         """
@@ -57,6 +57,13 @@ class LinearRegression:
                 self.errors.append(l)
 
             elif (loss == "pinball"):
+                # Pinball loss at quantile tau:
+                # loss(y, y_hat) = max(tau*(y - y_hat), (tau-1)*(y - y_hat))
+                # With error = y_hat - y, this is max((1-tau)*error, tau*(-error))
+                # Subgradient wrt y_hat:
+                #   if y_hat > y: (1 - tau)
+                #   else:         (-tau)
+                # (at equality, any value in [-tau, 1-tau] is a valid subgradient)
                 indicator = (y_pred > y).astype(float) 
                 
                 # Le terme de gradient est (Indicator - tau)
@@ -77,9 +84,24 @@ class LinearRegression:
                 self.errors.append(pinball_loss)
                 
                 l = pinball_loss
+                
+                if verbose and (i % log_every == 0 or i == self.maxIter - 1):
+                    frac_ge = float(np.mean(y_pred >= y))
+                    print(
+                        f"[pinball] iter={i} loss={pinball_loss:.6f} "
+                        f"mean(y_hat)={float(np.mean(y_pred)):.3f} "
+                        f"mean(y)={float(np.mean(y)):.3f} "
+                        f"frac(y_hat>=y)={frac_ge:.3f}"
+                    )
 
             if l < 1e-6:
                 break
+        
+        # Final diagnostic: empirical coverage on training data
+        if verbose and loss == "pinball":
+            y_pred_final = np.dot(X, self.weights) + self.bias
+            coverage = float(np.mean(y <= y_pred_final))
+            print(f"[pinball] final empirical coverage P(y <= y_hat)={coverage:.3f} (target tau={self.tau})")
 
         return self
     
