@@ -1,5 +1,4 @@
 # Base model : Linear Regression from scratch
-
 import numpy as np
 
 # import the score.py file from ../Python for loss functions
@@ -8,12 +7,13 @@ import numpy as np
 
 class LinearRegression:
     """Linear model"""
-    def __init__(self, learning_rate=0.01, maxIter=1000):
+    def __init__(self, learning_rate=0.01, maxIter=1000, tau = 0.8):
         self.learning_rate = learning_rate
         self.maxIter = maxIter
         self.weights = None
         self.bias = None 
         self.errors = []
+        self.tau = tau
     
     # def __ones_trick(self, X):
     #     """
@@ -28,37 +28,81 @@ class LinearRegression:
     #     """
     #     return -2/N * np.dot(X.T, (y-y_pred)), -2 * np.mean()
 
-    def fit(self, X, y):
+    def fit(self, X, y, loss="rmse", verbose=False, log_every=500):
         """
-        Fitting the model returning the errorn, the weights, and f
+        Fitting the model returning the errors, the weights, and f
         """
-        # X = self.__ones_trick(X)
         N, d = X.shape
 
         self.bias = 0.0
         self.weights = np.zeros(d)
+        
+        # Sécurité : Si on fait du pinball mais que tau n'est pas défini, on met la médiane par défaut
+        if loss == "pinball" and not hasattr(self, 'tau'):
+             self.tau = 0.5 
 
         for i in range(self.maxIter):
             y_pred = np.dot(X, self.weights) + self.bias 
             error = y_pred - y
 
-            grad_w = (2 / N) * (X.T @ error)
-            grad_b = (2 / N) * np.sum(error)
+            if (loss == "rmse"):
+                grad_w = (2 / N) * (X.T @ error)
+                grad_b = (2 / N) * np.sum(error)
 
-            self.weights -= self.learning_rate * grad_w
-            self.bias -= self.learning_rate * grad_b
+                self.weights -= self.learning_rate * grad_w
+                self.bias -= self.learning_rate * grad_b
 
-            rmse = np.sqrt(np.mean(error**2))
-            self.errors.append(rmse)
-            
-            if rmse < 1e-6:
+                # On stocke la RMSE
+                l = np.sqrt(np.mean(error**2))
+                self.errors.append(l)
+
+            elif (loss == "pinball"):
+                # Pinball loss at quantile tau:
+                # loss(y, y_hat) = max(tau*(y - y_hat), (tau-1)*(y - y_hat))
+                # With residual r = y - y_hat, this is max(tau*r, (tau-1)*r)
+                # Subgradient wrt y_hat:
+                #   if r > 0  (y_hat < y):  dL/dy_hat = -tau
+                #   if r < 0  (y_hat > y):  dL/dy_hat = 1 - tau
+                # (at equality, any value in [-tau, 1-tau] is a valid subgradient)
+                r = y - y_pred
+                grad_factor = (r < 0).astype(float) - self.tau
+                
+                # IMPORTANT: use the subgradient of the SUM pinball loss here (no /N),
+                # to keep step magnitudes comparable to the existing RMSE setting
+                # without changing the learning rate.
+                grad_w = (X.T @ grad_factor)
+                grad_b = np.sum(grad_factor)
+
+                self.weights -= self.learning_rate * grad_w
+                self.bias -= self.learning_rate * grad_b
+
+                # 2. Calcul de la Pinball Loss moyenne pour l'historique
+                # Formule : max((1-tau)*error, -tau*error)
+                # Rappel: error = y_pred - y
+                pinball_loss = np.mean(np.maximum((1 - self.tau) * error, self.tau * (-error)))
+                self.errors.append(pinball_loss)
+                
+                l = pinball_loss
+                
+                if verbose and (i % log_every == 0 or i == self.maxIter - 1):
+                    frac_ge = float(np.mean(y_pred >= y))
+                    print(
+                        f"[pinball] iter={i} loss={pinball_loss:.6f} "
+                        f"mean(y_hat)={float(np.mean(y_pred)):.3f} "
+                        f"mean(y)={float(np.mean(y)):.3f} "
+                        f"frac(y_hat>=y)={frac_ge:.3f}"
+                    )
+
+            if l < 1e-6:
                 break
+        
+        # Final diagnostic: empirical coverage on training data
+        if verbose and loss == "pinball":
+            y_pred_final = np.dot(X, self.weights) + self.bias
+            coverage = float(np.mean(y <= y_pred_final))
+            print(f"[pinball] final empirical coverage P(y <= y_hat)={coverage:.3f} (target tau={self.tau})")
 
         return self
     
     def predict(self, X):
-        """
-        Predicting
-        """
         return np.dot(X, self.weights) + self.bias
-    
