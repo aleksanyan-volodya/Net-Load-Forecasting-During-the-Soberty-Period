@@ -86,14 +86,16 @@ class LinearRegression:
                 # Implemented compactly as (r < 0).astype(float) - tau
                 grad_factor = (r < 0).astype(float) - self.tau
 
-                # We use the subgradient of the SUM pinball loss (no division by N)
-                # so step magnitudes are comparable to the existing RMSE implementation.
-                # For the L2 penalty term (lambda * ||w||^2), the gradient w.r.t. w is 2 * lambda * w.
-                # We add this gradient to the pinball-gradient for the full objective:
-                #   grad_w = grad_pinball + 2 * lambda_reg * w
+                # We use the subgradient of the AVERAGE pinball loss (divide by N)
+                # to keep step magnitudes consistent with the RMSE implementation
+                # (which uses gradients scaled by 1/N). This makes the learning rate
+                # selection much more stable for typical values.
+                # For the L2 penalty term (lambda * ||w||^2), the gradient w.r.t. w is 2 * lambda * w
+                # (regularization is not divided by N here because we treat lambda_reg as
+                # the strength on the full objective: pinball_mean + lambda * ||w||^2).
                 # The bias/intercept is NOT regularized.
-                grad_w = (X.T @ grad_factor) + 2.0 * self.lambda_reg * self.weights
-                grad_b = np.sum(grad_factor)
+                grad_w = (1.0 / N) * (X.T @ grad_factor) + 2.0 * self.lambda_reg * self.weights
+                grad_b = (1.0 / N) * np.sum(grad_factor)
 
                 self.weights -= self.learning_rate * grad_w
                 self.bias -= self.learning_rate * grad_b
