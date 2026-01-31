@@ -7,13 +7,28 @@ import numpy as np
 
 class LinearRegression:
     """Linear model"""
-    def __init__(self, learning_rate=0.01, maxIter=1000, tau = 0.8):
+    def __init__(self, learning_rate=0.01, maxIter=1000, tau=0.8, lambda_reg=0.0):
+        """
+        Linear regression model with optional L2 regularization for pinball (quantile) loss.
+
+        Objective (for pinball mode):
+            objective = pinball_loss + lambda_reg * ||w||^2
+        Note: the bias/intercept is NOT regularized.
+
+        lambda_reg : L2 regularization strength (>= 0.0). This penalty shrinks coefficients
+                     (reduces variance), improves numerical stability when features are
+                     correlated, and helps generalization by discouraging large weights.
+                     Set to 0.0 to recover the original unregularized pinball model.
+        """
         self.learning_rate = learning_rate
         self.maxIter = maxIter
         self.weights = None
-        self.bias = None 
-        self.errors = []
+        self.bias = None
+        self.errors = []              # history of (unregularized) pinball loss
+        self.objective_history = []   # history of (pinball + lambda * ||w||^2) objective
+        self.reg_history = []         # history of regularization penalty (lambda * ||w||^2)
         self.tau = tau
+        self.lambda_reg = float(lambda_reg)  # regularization strength (>= 0.0)
     
     # def __ones_trick(self, X):
     #     """
@@ -65,32 +80,47 @@ class LinearRegression:
                 #   if r < 0  (y_hat > y):  dL/dy_hat = 1 - tau
                 # (at equality, any value in [-tau, 1-tau] is a valid subgradient)
                 r = y - y_pred
+                # Subgradient of per-sample pinball loss w.r.t. prediction y_hat:
+                #   if r > 0 : dL/dy_hat = -tau
+                #   if r < 0 : dL/dy_hat = 1 - tau
+                # Implemented compactly as (r < 0).astype(float) - tau
                 grad_factor = (r < 0).astype(float) - self.tau
-                
-                # IMPORTANT: use the subgradient of the SUM pinball loss here (no /N),
-                # to keep step magnitudes comparable to the existing RMSE setting
-                # without changing the learning rate.
-                grad_w = (X.T @ grad_factor)
+
+                # We use the subgradient of the SUM pinball loss (no division by N)
+                # so step magnitudes are comparable to the existing RMSE implementation.
+                # For the L2 penalty term (lambda * ||w||^2), the gradient w.r.t. w is 2 * lambda * w.
+                # We add this gradient to the pinball-gradient for the full objective:
+                #   grad_w = grad_pinball + 2 * lambda_reg * w
+                # The bias/intercept is NOT regularized.
+                grad_w = (X.T @ grad_factor) + 2.0 * self.lambda_reg * self.weights
                 grad_b = np.sum(grad_factor)
 
                 self.weights -= self.learning_rate * grad_w
                 self.bias -= self.learning_rate * grad_b
 
-                # 2. Calcul de la Pinball Loss moyenne pour l'historique
-                # Formule : max((1-tau)*error, -tau*error)
-                # Rappel: error = y_pred - y
+                # 2. Compute the (unregularized) average Pinball Loss for logging
+                # Formula : max((1-tau)*error, -tau*error)
+                # Recall: error = y_pred - y
                 pinball_loss = np.mean(np.maximum((1 - self.tau) * error, self.tau * (-error)))
+
+                # regularization penalty (added to objective; bias is not regularized)
+                reg_penalty = self.lambda_reg * np.sum(self.weights ** 2)
+                objective = pinball_loss + reg_penalty
+
+                # keep histories: raw pinball loss (for interpretability), regularization, and full objective
                 self.errors.append(pinball_loss)
-                
-                l = pinball_loss
-                
+                self.reg_history.append(reg_penalty)
+                self.objective_history.append(objective)
+
+                # Use the full objective as stopping criterion
+                l = objective
+
                 if verbose and (i % log_every == 0 or i == self.maxIter - 1):
                     frac_ge = float(np.mean(y_pred >= y))
                     print(
-                        f"[pinball] iter={i} loss={pinball_loss:.6f} "
-                        f"mean(y_hat)={float(np.mean(y_pred)):.3f} "
-                        f"mean(y)={float(np.mean(y)):.3f} "
-                        f"frac(y_hat>=y)={frac_ge:.3f}"
+                        f"[pinball] iter={i} pinball={pinball_loss:.6f} reg={reg_penalty:.6f} "
+                        f"obj={objective:.6f} mean(y_hat)={float(np.mean(y_pred)):.3f} "
+                        f"mean(y)={float(np.mean(y)):.3f} frac(y_hat>=y)={frac_ge:.3f}"
                     )
 
             if l < 1e-6:
