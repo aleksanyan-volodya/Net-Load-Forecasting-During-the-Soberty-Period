@@ -41,7 +41,7 @@ class LinearModel:
 
         for i in range(self.maxIter):
             y_pred = np.dot(X, self.weights) + self.bias 
-            error = y - y_pred
+            error = y_pred - y
 
             # --- 1. Calcul du Gradient de base (Data term) ---
             if loss == "rmse":
