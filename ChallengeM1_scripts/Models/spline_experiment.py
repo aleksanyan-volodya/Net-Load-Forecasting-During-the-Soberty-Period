@@ -19,6 +19,9 @@ sys.path.append(HERE)
 sys.path.append(os.path.join(HERE, '..', 'Python'))
 from Linear import LinearRegression
 from spline_features import add_spline_features
+# pinball loss from project utilities
+sys.path.append(os.path.join(HERE, '..', 'Python'))
+from score import pinball_loss
 
 
 # Small helpers mirroring notebook behavior
@@ -68,41 +71,20 @@ def main():
     X_val_full = X.iloc[split:].copy()
     y_val = y.iloc[split:].copy()
 
-    # Baseline: no splines
-    # Normalize based on training split
-    scale_cols = find_continuous_columns(X_tr_full)
-    X_tr_norm, X_mean, X_std = normalize(X_tr_full, scale_cols=scale_cols)
-    X_val_norm = X_val_full.copy()
-    if len(scale_cols) > 0:
-        X_val_norm[scale_cols] = (X_val_norm[scale_cols] - X_mean) / X_std.replace(0, 1.0)
-
-    X_tr_np = X_tr_norm.values
-    X_val_np = X_val_norm.values
-    y_tr_np = y_tr_full.values
-    y_val_np = y_val.values
-
     # Model hyperparameters consistent with existing experiments
     tau = 0.8
     learning_rate = 0.02
     maxIter = 17000
 
-    print('\n--- Running baseline Linear pinball (no splines) ---')
-    lin = LinearRegression(learning_rate=learning_rate, maxIter=maxIter, tau=tau)
-    lin.fit(X_tr_np, y_tr_np, loss='pinball', verbose=False)
-    yhat_lin_val = lin.predict(X_val_np)
-
-    from score import pinball_loss
-    pb_lin = pinball_loss(y_val_np, yhat_lin_val, quant=[tau])
-    coverage_lin = float(np.mean(y_val_np <= yhat_lin_val))
-
-    # Basic checks
-    mean_y = float(y_tr_np.mean())
-    mean_lin = float(yhat_lin_val.mean())
-    var_lin = float(np.var(yhat_lin_val))
-
     print(f'features before expansion: {X_tr_full.shape[1]}')
-    print(f'Baseline pinball_loss: {pb_lin:.6f}, coverage: {coverage_lin:.3f}')
-    print(f'Baseline mean(y_train)={mean_y:.3f}, mean(y_hat_val)={mean_lin:.3f}, var(y_hat_val)={var_lin:.3f}')
+
+    # Note: Baseline normalization and training are performed AFTER spline expansion
+    # so the global order becomes: spline expansion -> normalization -> training
+    # (this keeps the pipeline consistent and ensures normalization uses expanded feature sets where applicable)
+
+    # We'll compute y arrays now for later use
+    y_tr_np = y_tr_full.values
+    y_val_np = y_val.values
 
     # --- Spline expansion on selected columns ---
     spline_cols = ['Temp', 'toy', 'Load.1']
@@ -113,7 +95,7 @@ def main():
 
     print(f'features after expansion: {X_tr_spl.shape[1]}')
 
-    # Normalize continuous columns after expansion
+    # Normalize continuous columns AFTER expansion (for spline pipeline)
     scale_cols_spl = find_continuous_columns(X_tr_spl)
     X_tr_spl_norm, X_mean_spl, X_std_spl = normalize(X_tr_spl, scale_cols=scale_cols_spl)
     X_val_spl_norm = X_val_spl.copy()
@@ -122,6 +104,30 @@ def main():
 
     X_tr_spl_np = X_tr_spl_norm.values
     X_val_spl_np = X_val_spl_norm.values
+
+    # --- NOW normalize the baseline features (after expansion step) so the sequence is consistent ---
+    scale_cols = find_continuous_columns(X_tr_full)
+    X_tr_norm, X_mean, X_std = normalize(X_tr_full, scale_cols=scale_cols)
+    X_val_norm = X_val_full.copy()
+    if len(scale_cols) > 0:
+        X_val_norm[scale_cols] = (X_val_norm[scale_cols] - X_mean) / X_std.replace(0, 1.0)
+
+    X_tr_np = X_tr_norm.values
+    X_val_np = X_val_norm.values
+
+    # Train baseline AFTER normalization (so the global order is: expansion -> normalization -> training)
+    print('\n--- Running baseline Linear pinball (no splines) ---')
+    lin = LinearRegression(learning_rate=learning_rate, maxIter=maxIter, tau=tau)
+    lin.fit(X_tr_np, y_tr_np, loss='pinball', verbose=False)
+    yhat_lin_val = lin.predict(X_val_np)
+
+    pb_lin = pinball_loss(y_val_np, yhat_lin_val, quant=[tau])
+    coverage_lin = float(np.mean(y_val_np <= yhat_lin_val))
+
+    # Basic checks for baseline
+    mean_y = float(y_tr_np.mean())
+    mean_lin = float(yhat_lin_val.mean())
+    var_lin = float(np.var(yhat_lin_val))
 
     # Train pinball linear model on spline-expanded features
     print('\n--- Training Linear pinball on spline-expanded features (GAM-style) ---')
