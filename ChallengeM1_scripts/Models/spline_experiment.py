@@ -228,9 +228,9 @@ def main():
         print('Synthetic spline pinball_loss:', pb_spl_s)
         print('Synthetic mean absolute diff (val preds):', float(np.mean(np.abs(yhat_lin_s_val - yhat_spl_s_val))))
         if pb_spl_s < pb_lin_s:
-            print('Result: spline-expanded model fits the non-linear synthetic target better (as expected). ✅')
+            print('Result: spline-expanded model fits the non-linear synthetic target better (as expected). GOOD')
         else:
-            print('Result: spline did NOT improve synthetic non-linear fit — unexpected. ⚠️')
+            print('Result: spline did NOT improve synthetic non-linear fit — unexpected. PROBLEM')
 
 
 if __name__ == '__main__':
