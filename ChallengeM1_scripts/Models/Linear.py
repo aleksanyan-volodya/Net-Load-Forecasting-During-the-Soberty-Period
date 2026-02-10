@@ -9,6 +9,7 @@ class LinearModel:
     """Linear model with Quantile Regression and configurable Regularization"""
     
     def __init__(self, learning_rate=0.01, maxIter=1000, tau=0.8, lambda_reg=0.0, penalty='l2'):
+        
         """
         penalty : 'l2' (Ridge) or 'l1' (Lasso).
                   - 'l2': Adds lambda * ||w||^2. Good for correlated features.
@@ -66,6 +67,7 @@ class LinearModel:
                 # Metric pour l'historique
                 # max((1-tau)*error_pos, -tau*error_neg) where error = y_pred - y
                 current_loss_val = np.mean(np.maximum((1 - self.tau) * error, self.tau * (-error)))
+                
 
             # --- 2. Ajout de la Régularisation (Gradient & Loss) ---
             grad_reg = np.zeros_like(self.weights)
