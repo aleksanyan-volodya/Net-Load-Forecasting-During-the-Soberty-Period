@@ -12,25 +12,16 @@ This script keeps the optimizer unchanged (plain gradient descent).
 import numpy as np
 import pandas as pd
 import os, sys
-# allow importing the sibling module `Linear.py` when the script is run directly
-sys.path.append(os.path.dirname(__file__))
 from Linear import LinearRegression
-
-
-def pinball_loss(y, y_hat, tau=0.8):
-    """Average pinball loss for quantile tau."""
-    r = y - y_hat
-    return np.mean(np.maximum(tau * r, (tau - 1) * r))
-
+sys.path.append('../Python')
+from score import pinball_loss
 
 def coverage(y, y_hat):
     return float(np.mean(y <= y_hat))
 
-
 def load_data(path):
-    df = pd.read_csv(path, parse_dates=["Date"])  # keep time order
+    df = pd.read_csv(path, parse_dates=["Date"])
     return df
-
 
 if __name__ == "__main__":
     df = load_data("../Data/train.csv")
@@ -64,7 +55,7 @@ if __name__ == "__main__":
     # features and tune a small learning rate for numerical stability.
 
     # Experiment grid for lambda_reg (from no regularization to strong)
-    lambdas = [0.0, 1e-4, 1e-3, 1e-2, 1e-1, 1.0, 10.0]
+    lambdas = [0.0, 1e-8, 1e-6, 5e-5, 1e-5, 1e-4, 5e-4, 5e-3, 1e-3, 1e-2, 1e-1, 1.0, 5.0, 8.0, 9.0, 10.0]
     results = []
 
     for lam in lambdas:
@@ -72,7 +63,7 @@ if __name__ == "__main__":
         # Use a small learning rate for the pinball gradient (features are large-scale).
         # Still plain gradient descent; reducing the step size keeps training stable.
         # Increase maxIter to give the optimizer more time to converge with small steps.
-        model = LinearRegression(learning_rate=1e-9, maxIter=3000, tau=0.8, lambda_reg=lam)
+        model = LinearRegression(learning_rate=1e-4, maxIter=10000, tau=0.8, lambda_reg=lam)
         model.fit(X_train, y_train, loss="pinball", verbose=False)
 
         y_hat_train = model.predict(X_train)

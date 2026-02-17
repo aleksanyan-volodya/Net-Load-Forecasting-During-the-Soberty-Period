@@ -3,7 +3,7 @@ Simple GAM experiment script for expectile-based approximate quantile regression
 
 Design choices and notes:
 - Uses pyGAM (https://pygam.readthedocs.io/). Picked because it's a
-  standard, well-documented Python library for Generalized Additive Models.
+  standard, well-documented Python library for GAMs.
 - pyGAM does not implement direct pinball (quantile) loss. It implements
   ExpectileGAM which fits "expectiles" (asymmetric squared error). Expectiles
   are not identical to quantiles (pinball loss), but are a close and standard
@@ -20,31 +20,11 @@ import os
 import sys
 import numpy as np
 import pandas as pd
+from pygam import s, ExpectileGAM
 
-# Make sure we can import supporting scripts regardless of current working dir
-HERE = os.path.dirname(__file__)
-sys.path.append(os.path.join(HERE, '..', 'Python'))  # for score.py
-
-# Import pinball_loss implementation used elsewhere in the project
-try:
-    from score import pinball_loss
-except Exception:
-    # Fallback: simple local implementation (keeps script runnable)
-    def pinball_loss(y, yhat_quant, quant, output_vect=False):
-        yhat_quant = np.asarray(yhat_quant)
-        quant = np.asarray(quant)
-        if yhat_quant.ndim == 1:
-            yhat_quant = yhat_quant[:, None]
-        nq = yhat_quant.shape[1]
-        loss_q = np.zeros(nq)
-        for q in range(nq):
-            loss_q[q] = np.nanmean(
-                (y - yhat_quant[:, q]) * (quant[q] - (y < yhat_quant[:, q]))
-            )
-        if output_vect:
-            return loss_q
-        else:
-            return np.mean(loss_q)
+sys.path.append('../Python')
+from score import pinball_loss
+from Linear import LinearRegression
 
 
 # Utility functions reused from the notebook to keep feature handling consistent
@@ -77,8 +57,7 @@ def normalize(X, scale_cols=None):
 
 
 def build_gam_terms(n_features):
-    # Lazily build terms s(0) + s(1) + ... for pygam
-    from pygam import s
+    # Build terms s(0) + s(1) + ... + s(n_features)
     terms = s(0)
     for i in range(1, n_features):
         terms = terms + s(i)
@@ -89,14 +68,14 @@ def main():
     # Reproducibility
     np.random.seed(0)
 
-    # Load data using same paths as the notebook
-    data_dir = os.path.join(HERE, '..', 'Data')
-    train_path = os.path.join(data_dir, 'train.csv')
-    test_path = os.path.join(data_dir, 'test.csv')
-
     print("Loading data...")
-    Data_train = pd.read_csv(train_path, parse_dates=["Date"]) 
-    Data_test = pd.read_csv(test_path, parse_dates=["Date"]) 
+    Data_train = Data_train = pd.read_csv(
+        "../Data/train.csv",
+        parse_dates=["Date"])
+    
+    Data_test = Data_train = pd.read_csv(
+        "../Data/tets.csv",
+        parse_dates=["Date"])
 
     # Build features exactly like in the notebook
     X_train = Data_train.drop(columns=["Net_demand", "Date", "Solar_power", "Wind_power", "Load"])
@@ -123,13 +102,6 @@ def main():
     # target quantile/expectile
     tau = 0.8
 
-    # --- Fit Expectile GAM (pyGAM) ---
-    try:
-        from pygam import ExpectileGAM
-    except ImportError:
-        print("pygam is not installed. Install it with: pip install pygam")
-        return
-
     print("Building GAM terms and fitting ExpectileGAM (expectile=0.8).")
     terms = build_gam_terms(X_train_np.shape[1])
 
@@ -155,63 +127,47 @@ def main():
     yhat_gam_val = gam.predict(X_val)
 
     # Evaluate on validation set
-    pb_gam = pinball_loss(y_val, yhat_gam_val, quant=[tau])
+    pb_gam = pinball_loss(y_val, yhat_gam_val, quant=tau)
     coverage_gam = float(np.mean(y_val <= yhat_gam_val))
 
-    # --- Baseline: Linear pinball model from project (explicit gradient-based solver) ---
-    # Import local LinearRegression implementation
-    sys.path.append(HERE)  # ensure current Models dir is importable
-    try:
-        from Linear import LinearRegression
-    except Exception as e:
-        print("Could not import LinearRegression from Linear.py; skipping baseline comparison.", e)
-        LinearRegression = None
+    # --- Baseline: Linear pinball model (explicit gradient-based solver) ---
+    print("Fitting baseline Linear pinball model (tau=0.8) on the same train split...")
+    lin = LinearRegression(learning_rate=0.02, maxIter=8000, tau=tau)
+    lin.fit(X_tr, y_tr, loss="pinball", verbose=False)
+    yhat_lin_val = lin.predict(X_val)
+    pb_lin = pinball_loss(y_val, yhat_lin_val, quant=[tau])
+    coverage_lin = float(np.mean(y_val <= yhat_lin_val))
 
-    if LinearRegression is not None:
-        print("Fitting baseline Linear pinball model (tau=0.8) on the same train split...")
-        lin = LinearRegression(learning_rate=0.02, maxIter=17000, tau=tau)
-        lin.fit(X_tr, y_tr, loss="pinball", verbose=False)
-        yhat_lin_val = lin.predict(X_val)
-        pb_lin = pinball_loss(y_val, yhat_lin_val, quant=[tau])
-        coverage_lin = float(np.mean(y_val <= yhat_lin_val))
-
-        # Basic check for divergence / poor convergence of gradient-based linear solver
-        if pb_lin > 1e5 or coverage_lin < 0.01:
-            print("Warning: Linear baseline shows very large loss or near-zero coverage. Consider tuning learning_rate/maxIter or checking feature scaling.")
-    else:
-        pb_lin = None
-        coverage_lin = None
+    # Basic check for divergence / poor convergence of gradient-based linear solver
+    if pb_lin > 1e5 or coverage_lin < 0.01:
+        print("Warning: Linear baseline shows very large loss or near-zero coverage !!!")
 
     # Quick checks and printouts
     print("\n--- Summary (tau=0.8) ---")
-    print("GAM (Expectile) -> pinball_loss (on same tau): {:.6f}".format(pb_gam))
-    print("GAM empirical coverage P(y <= y_hat): {:.3f}".format(coverage_gam))
-    if pb_lin is not None:
-        print("Linear pinball -> pinball_loss: {:.6f}".format(pb_lin))
-        print("Linear empirical coverage P(y <= y_hat): {:.3f}".format(coverage_lin))
+    print("GAM (Expectile) loss -> : {:.6f}".format(pb_gam))
+    print("GAM P(y <= y_hat): {:.3f}".format(coverage_gam))
+    print("Linear pinball loss -> : {:.6f}".format(pb_lin))
+    print("Linear P(y <= y_hat): {:.3f}".format(coverage_lin))
 
     # Confirm that GAM learned non-linear effects and outputs are on same scale
     print("\nDebug checks:")
     print(" mean(y_train_split)={:.3f}, mean(yhat_gam_val)={:.3f}, mean(yhat_lin_val)={:.3f}".format(
-        float(y_tr.mean()), float(yhat_gam_val.mean()), float(yhat_lin_val.mean() if LinearRegression else np.nan)
+        float(y_tr.mean()), float(yhat_gam_val.mean()), float(yhat_lin_val.mean())
     ))
 
     # Check simple non-linearity presence by comparing linear vs GAM fit on training data
     yhat_gam_train = gam.predict(X_train_np)
-    if LinearRegression is not None:
-        yhat_lin_train = lin.predict(X_train_np)
-        # If GAM predictions differ non-trivially from linear predictions, we likely have non-linear effects
-        diff = np.mean(np.abs(yhat_gam_train - yhat_lin_train))
-        print(" mean absolute difference (GAM vs Linear) on train predictions: {:.3f}".format(diff))
-        if diff > 1e-3:
-            print(" Note: GAM shows non-linear behavior (predictions differ from linear model). ✅")
-        else:
-            print(" Note: GAM predictions are very close to linear model -> may not have learned strong non-linearities. ⚠️")
+    yhat_lin_train = lin.predict(X_train_np)
+
+    # If GAM predictions differ non-trivially from linear predictions, we likely have non-linear effects
+    diff = np.mean(np.abs(yhat_gam_train - yhat_lin_train))
+    print(" mean absolute difference (GAM vs Linear) on train predictions: {:.3f}".format(diff))
+    if diff > 1e-3:
+        print(" Note: GAM shows non-linear behavior (predictions differ from linear model).")
     else:
-        print(" Note: No linear baseline to compare non-linearity against.")
+        print(" Note: GAM predictions are very close to linear model -> may not have learned strong non-linearities.")
 
     print("\nDone.")
-
 
 if __name__ == '__main__':
     main()
