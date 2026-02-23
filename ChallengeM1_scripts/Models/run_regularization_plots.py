@@ -47,7 +47,7 @@ def run_sweep(train_csv='../Data/train.csv'):
     for lr in learning_rates:
         for lam in lambdas:
             print(f"Training lr={lr} lambda={lam}")
-            model = LinearRegression(learning_rate=lr, maxIter=3000, tau=0.8, lambda_reg=lam)
+            model = LinearRegression(learning_rate=lr, maxIter=000, tau=0.8, lambda_reg=lam)
             model.fit(X_train, y_train, loss='pinball', verbose=False)
             y_hat_train = model.predict(X_train)
             y_hat_val = model.predict(X_val)
