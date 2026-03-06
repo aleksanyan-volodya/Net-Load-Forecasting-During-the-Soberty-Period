@@ -1,4 +1,19 @@
-"""Compare baseline linear pinball vs spline-expanded features."""
+"""Compare baseline linear model vs spline-expanded linear model.
+
+This script trains two pinball-loss models:
+1) baseline linear features,
+2) linear model on spline-expanded features.
+
+Notes
+-----
+- Data split is time-based (last 20 percent for validation).
+- Both pipelines apply the same style of normalization.
+
+Inspiration
+-----------
+- Existing project linear experiments and score utility.
+- scikit-learn spline feature engineering workflow.
+"""
 
 import os
 import sys
@@ -14,6 +29,18 @@ sys.path.append(os.path.join(HERE, '..', 'Python'))
 from score import pinball_loss
 
 def find_continuous_columns(X: pd.DataFrame):
+    """Return columns that look continuous and not binary.
+
+    Parameters
+    ----------
+    X : pandas.DataFrame
+        Input feature table.
+
+    Returns
+    -------
+    list of str
+        Column names to scale.
+    """
     continuous_cols = []
     for col in X.columns:
         s = X[col]
@@ -27,6 +54,24 @@ def find_continuous_columns(X: pd.DataFrame):
 
 
 def normalize(X: pd.DataFrame, scale_cols=None):
+    """Scale selected columns with z-score normalization.
+
+    Parameters
+    ----------
+    X : pandas.DataFrame
+        Input feature table.
+    scale_cols : list of str or None, default=None
+        Columns to scale. If ``None``, columns are auto-detected.
+
+    Returns
+    -------
+    X_norm : pandas.DataFrame
+        Normalized DataFrame.
+    mean : pandas.Series
+        Mean used for each scaled column.
+    std : pandas.Series
+        Standard deviation used for each scaled column.
+    """
     X_norm = X.copy()
     if scale_cols is None:
         scale_cols = find_continuous_columns(X_norm)
@@ -39,6 +84,7 @@ def normalize(X: pd.DataFrame, scale_cols=None):
 
 
 def main():
+    """Run baseline and spline experiments with shared settings."""
     np.random.seed(0)
     data_dir = os.path.join(HERE, '..', 'Data')
     train_path = os.path.join(data_dir, 'train.csv')
@@ -50,6 +96,7 @@ def main():
 
     X = pd.get_dummies(X, columns=['WeekDays'], prefix='WeekDays', drop_first=True, dtype=float)
 
+    # Time split keeps chronology: early rows for training, later rows for validation.
     N = len(X)
     split = int(N * 0.8)
     X_tr_full = X.iloc[:split].copy()
@@ -70,6 +117,7 @@ def main():
 
     print('\n--- Applying spline expansion to columns:', spline_cols, '---')
     X_tr_spl, transformers = add_spline_features(X_tr_full, spline_cols, n_knots=5, degree=3, include_bias=False)
+    # Reuse train-fitted transformers on validation to avoid leakage.
     X_val_spl, _ = add_spline_features(X_val_full, spline_cols, transformers=transformers)
 
     print(f'features after expansion: {X_tr_spl.shape[1]}')
@@ -129,6 +177,7 @@ def main():
         weight_shape_info = (None, None)
     else:
         weight_shape_info = (w_lin.shape[0], w_spl.shape[0])
+        # Compare only the shared part because vector sizes are different.
         m = min(w_lin.shape[0], w_spl.shape[0])
         weight_diff_norm = float(np.linalg.norm(w_lin[:m] - w_spl[:m]))
 
@@ -166,6 +215,7 @@ def main():
     print('\n--- Synthetic sanity check: target = non-linear function of Temp ---')
     run_synthetic = True
     if run_synthetic:
+        # Synthetic target helps verify that spline features capture non-linear patterns.
         Temp = X['Temp'].values
         Temp_norm = (Temp - Temp.min()) / (Temp.max() - Temp.min())
         y_synth = 10000.0 * np.sin(2 * np.pi * Temp_norm) + 200.0 * np.random.randn(len(Temp_norm))

@@ -1,4 +1,18 @@
-"""GAM experiment using pyGAM ExpectileGAM."""
+"""Train a GAM model and compare it with a linear pinball baseline.
+
+This script fits ``pygam.ExpectileGAM`` with expectile ``tau=0.8`` and compares
+it to the project linear model trained with pinball loss.
+
+Notes
+-----
+- Feature preparation follows the project training scripts.
+- ExpectileGAM is used as a practical proxy for quantile-like behavior.
+
+Inspiration
+-----------
+- pyGAM documentation and examples.
+- Existing project scripts for linear baseline and scoring.
+"""
 
 import os
 import sys
@@ -11,6 +25,18 @@ from score import pinball_loss
 from Linear import LinearRegression
 
 def find_continuous_columns(X):
+    """Return non-binary columns that should be scaled.
+
+    Parameters
+    ----------
+    X : pandas.DataFrame
+        Input feature table.
+
+    Returns
+    -------
+    list of str
+        Column names treated as continuous.
+    """
     continuous_cols = []
     for col in X.columns:
         s = X[col]
@@ -24,6 +50,29 @@ def find_continuous_columns(X):
 
 
 def normalize(X, scale_cols=None):
+    """Standardize selected columns with mean and standard deviation.
+
+    Parameters
+    ----------
+    X : pandas.DataFrame
+        Input feature table.
+    scale_cols : list of str or None, default=None
+        Columns to scale. If ``None``, continuous columns are auto-detected.
+
+    Returns
+    -------
+    X_norm : pandas.DataFrame
+        Copy of ``X`` with scaled columns.
+    mean : pandas.Series
+        Mean used for each scaled column.
+    std : pandas.Series
+        Standard deviation used for each scaled column.
+
+    Raises
+    ------
+    ValueError
+        If ``X`` is not a pandas DataFrame.
+    """
     if isinstance(X, pd.DataFrame):
         X_norm = X.copy()
         if scale_cols is None:
@@ -39,6 +88,18 @@ def normalize(X, scale_cols=None):
 
 
 def build_gam_terms(n_features):
+    """Build additive spline terms for all feature columns.
+
+    Parameters
+    ----------
+    n_features : int
+        Number of columns in the design matrix.
+
+    Returns
+    -------
+    pygam.terms.Term
+        Sum of terms ``s(0) + s(1) + ... + s(n_features-1)``.
+    """
     terms = s(0)
     for i in range(1, n_features):
         terms = terms + s(i)
@@ -46,6 +107,10 @@ def build_gam_terms(n_features):
 
 
 def main():
+    """Run training, validation, and basic comparison logs.
+
+    The validation split is time-based (last 20 percent of rows).
+    """
     np.random.seed(0)
 
     print("Loading data...")
@@ -63,6 +128,7 @@ def main():
 
     X_train = pd.get_dummies(X_train, columns=['WeekDays'], prefix='WeekDays', drop_first=True, dtype=float)
     X_test = pd.get_dummies(X_test, columns=['WeekDays'], prefix='WeekDays', drop_first=True, dtype=float)
+    # Keep the same feature columns/order between train and test.
     X_test = X_test.reindex(columns=X_train.columns, fill_value=0.0)
 
     scale_cols = find_continuous_columns(X_train)
@@ -87,6 +153,7 @@ def main():
 
     yhat_gam_test = gam.predict(X_test_np)
 
+    # Time split: first 80% train, last 20% validation.
     N = X_train_np.shape[0]
     split = int(N * 0.8)
     X_tr = X_train_np[:split]

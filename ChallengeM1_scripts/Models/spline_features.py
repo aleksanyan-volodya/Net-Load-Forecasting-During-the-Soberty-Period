@@ -1,4 +1,12 @@
-"""Spline feature expansion utilities."""
+"""Utilities to expand numeric columns into spline basis features.
+
+The main goal is to keep a simple and reusable API for train/test workflows.
+
+Inspiration
+-----------
+- ``sklearn.preprocessing.SplineTransformer`` usage pattern.
+- Project need for GAM-like non-linear features with linear models.
+"""
 
 from typing import List, Tuple, Dict, Optional
 import pandas as pd
@@ -12,7 +20,36 @@ def add_spline_features(X: pd.DataFrame,
                         include_bias: bool = False,
                         transformers: Optional[Dict[str, SplineTransformer]] = None
                         ) -> Tuple[pd.DataFrame, Dict[str, SplineTransformer]]:
-    """Replace selected columns with spline basis features."""
+    """Replace selected columns with spline basis features.
+
+    Parameters
+    ----------
+    X : pandas.DataFrame
+        Input DataFrame.
+    columns : list of str
+        Columns to expand with splines.
+    n_knots : int, default=5
+        Number of knots passed to ``SplineTransformer``.
+    degree : int, default=3
+        Degree of the spline basis.
+    include_bias : bool, default=False
+        If True, include the bias basis term.
+    transformers : dict[str, SplineTransformer] or None, default=None
+        Pre-fitted transformers per column. If None, transformers are fitted
+        from ``X``.
+
+    Returns
+    -------
+    X_new : pandas.DataFrame
+        DataFrame where each selected column is replaced by spline columns.
+    fitted : dict[str, SplineTransformer]
+        Transformers used for each expanded column.
+
+    Raises
+    ------
+    KeyError
+        If one requested column is not present in ``X``.
+    """
     X_new = X.copy()
     fitted = {} if transformers is None else dict(transformers)
 
@@ -21,6 +58,7 @@ def add_spline_features(X: pd.DataFrame,
             raise KeyError(f"Column '{col}' not found in DataFrame")
 
         if col not in fitted:
+            # Fit one transformer per column for clear naming and easy reuse.
             tr = SplineTransformer(n_knots=n_knots, degree=degree, include_bias=include_bias)
             tr.fit(X_new[[col]].values)
             fitted[col] = tr
@@ -39,6 +77,7 @@ def add_spline_features(X: pd.DataFrame,
 
 
 if __name__ == "__main__":
+    """Small local smoke test."""
     import numpy as np
     df = pd.DataFrame({
         'Temp': np.linspace(0, 10, 11),
