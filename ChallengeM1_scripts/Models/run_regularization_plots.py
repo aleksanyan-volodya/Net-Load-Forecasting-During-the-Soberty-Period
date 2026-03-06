@@ -1,11 +1,14 @@
-"""
-Sweep learning rates and lambda_reg values, collect metrics, and produce plots
-showing the effect of L2 regularization and learning rate on pinball regression.
+"""Plot regularization effects: losses, weights, and coverage vs lambda.
 
-Saves:
- - regularization_sweep_results.csv
- - plots: losses_vs_lambda_{lr}.png, norm_vs_lambda.png, coverage_vs_lambda.png,
-   coeffs_vs_lambda.png
+Sweep learning rates and regularization strengths, then create plots showing:
+- Pinball loss vs lambda for each learning rate.
+- Weight norm decay with lambda.
+- Validation coverage vs lambda.
+- Coefficient paths for top features.
+
+Inspiration
+-----------
+- Existing project scripts for model training.
 """
 
 import os, sys
@@ -15,11 +18,41 @@ import matplotlib.pyplot as plt
 from Linear import LinearRegression
 
 def pinball_loss(y, y_hat, tau=0.8):
+    """Compute pinball/quantile loss.
+
+    Parameters
+    ----------
+    y : array_like
+        Actual values.
+    y_hat : array_like
+        Predicted values.
+    tau : float, default=0.8
+        Quantile level.
+
+    Returns
+    -------
+    float
+        Pinball loss.
+    """
     r = y - y_hat
     return np.mean(np.maximum(tau * r, (tau - 1) * r))
 
 
 def coverage(y, y_hat):
+    """Return fraction of predictions >= actual values.
+
+    Parameters
+    ----------
+    y : array_like
+        Actual values.
+    y_hat : array_like
+        Predicted values.
+
+    Returns
+    -------
+    float
+        P(y <= y_hat)
+    """
     return float(np.mean(y <= y_hat))
 
 
@@ -37,7 +70,6 @@ def run_sweep(train_csv='../Data/train.csv'):
     X_val = val[features].values
     y_val = val[target].values
 
-    # Use small learning rates that are stable for the (mean-scaled) pinball gradient
     learning_rates = [1e-8, 1e-9, 1e-10]
     lambdas = [0.0, 1e-4, 1e-3, 1e-2, 1e-1, 1.0, 10.0]
 
@@ -57,11 +89,9 @@ def run_sweep(train_csv='../Data/train.csv'):
             cov_val = coverage(y_val, y_hat_val)
             w_norm = float(np.linalg.norm(model.weights))
 
-            # detect divergence / numerical explosion and mark status
             status = 'ok'
             if (not np.isfinite(train_loss)) or (not np.isfinite(val_loss)) or train_loss > 1e8 or val_loss > 1e8:
                 status = 'diverged'
-                print(f" -> Diverged for lr={lr}, lambda={lam}: train={train_loss:.3e}, val={val_loss:.3e}")
 
             rows.append({
                 'lr': lr,
@@ -73,17 +103,14 @@ def run_sweep(train_csv='../Data/train.csv'):
                 'w_norm': w_norm,
                 'status': status
             })
-            # store weights for later coefficient plot
             weight_matrix[(lr, lam)] = model.weights.copy()
 
     results = pd.DataFrame(rows)
     results.to_csv('regularization_sweep_results.csv', index=False)
     print('Saved regularization_sweep_results.csv')
 
-    # Plotting
     os.makedirs('figures', exist_ok=True)
 
-    # 1) For each lr, plot train & val pinball vs lambda (skip diverged runs)
     for lr in learning_rates:
         sub = results[(results['lr'] == lr) & (results['status'] == 'ok')].sort_values('lambda')
         if sub.empty:
@@ -102,7 +129,6 @@ def run_sweep(train_csv='../Data/train.csv'):
         plt.close()
         print('Saved', fn)
 
-    # 2) Weight norm vs lambda (one line per lr)
     plt.figure(figsize=(8,5))
     for lr in learning_rates:
         sub = results[results['lr'] == lr].sort_values('lambda')
@@ -117,7 +143,6 @@ def run_sweep(train_csv='../Data/train.csv'):
     plt.close()
     print('Saved', fn)
 
-    # 3) Coverage vs lambda (validation)
     plt.figure(figsize=(8,5))
     for lr in learning_rates:
         sub = results[results['lr'] == lr].sort_values('lambda')
@@ -132,7 +157,6 @@ def run_sweep(train_csv='../Data/train.csv'):
     plt.close()
     print('Saved', fn)
 
-    # 4) Coefficient paths vs lambda for top-k coefficients (by abs at lambda=0, lr=middle)
     lr_mid = learning_rates[1]
     w0 = weight_matrix[(lr_mid, 0.0)]
     topk = np.argsort(np.abs(w0))[-6:][::-1]
