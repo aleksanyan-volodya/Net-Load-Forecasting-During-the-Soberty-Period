@@ -5,9 +5,7 @@ Design choices and notes:
 - Uses pyGAM (https://pygam.readthedocs.io/). Picked because it's a
   standard, well-documented Python library for GAMs.
 - pyGAM does not implement direct pinball (quantile) loss. It implements
-  ExpectileGAM which fits "expectiles" (asymmetric squared error). Expectiles
-  are not identical to quantiles (pinball loss), but are a close and standard
-  alternative when a quantile GAM is unavailable. See comments below.
+  ExpectileGAM which fits "expectiles" (asymmetric squared error). 
 - Reuses the same features, one-hot encoding for WeekDays and the same
   normalization (continuous columns standardized) as in `test_linear.ipynb`.
 - Minimal, readable code with clear output logs. No hyperparameter tuning.
