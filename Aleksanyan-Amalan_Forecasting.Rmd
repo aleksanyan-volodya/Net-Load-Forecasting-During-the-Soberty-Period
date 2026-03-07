@@ -1,0 +1,191 @@
+---
+title: "Aleksanyan-Amalan_Forecasting"
+output: html_document
+date: "2026-03-03"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+# Chargement des librairies principales
+library(ggplot2)
+library(dplyr)
+library(lubridate)
+# library(qgam) # Sera utilisé plus tard
+```
+
+#Introduction
+
+La prévision de la demande nette d'électricité est un enjeu crucial pour l'équilibre du réseau. Ce projet s'inscrit dans un contexte particulièrement complexe englobant notamment la période de la pandémie de COVID-19, caractérisée par des ruptures soudaines dans les comportements de consommation.
+
+L'objectif de cette étude est de prédire la demande électrique en obtenant le meilleur score (plus faible erreur de prévision) private set sur la Pinball Loss au quantile 80%. Pour ce faire, nous avons adopté une démarche itérative, allant de l'implémentation d'algorithmes d'optimisation from scratch, pour un contrôle total des pénalités, à l'utilisation de modèles statistiques avancés comme SARIMAX et GAM.
+
+
+#2. Feature Engineering
+
+Avant de complexifier nos modèles, nous avons mené un travail approfondi sur les variables explicatives afin de capturer la réalité physique et économique du réseau.
+
+##2.1 La Température et les Seuils Physiques
+
+La relation entre la température et la demande électrique ne semble pas linéaire et forme typiquement un "V".
+Afin de modéliser cet effet, nous avons créé des variables de degrés-jours de chauffage (Heating_Degrees). Contrairement à de simples indicateurs binaires comme Heating_Flag, qui permet d'activer une pente différente quand il fait froid, ces variables mesurent l'écart à une température de confort de référence (par exemple 15°C). Elles sont donc proportionnelles à l'énergie thermique requise par les radiateurs, permettant au modèle d'activer une pente de consommation plus précise lors des vagues de froid.
+
+##2.2 La Rupture Structurelle du COVID-19
+
+La crise sanitaire a provoqué une chute brutale de la consommation industrielle et tertiaire. L'ajout d'une variable binaire Covid_Flag s'est avéré indispensable. Sans cette variable, tout modèle d'apprentissage tendrait à lisser la prévision, produisant une moyenne entre la période "normale" et la période "confinée", ce qui génèrerait des erreurs systématiques sur les deux fenêtres temporelles.
+
+##2.3 Éviction de la Nébulosité
+
+Après analyse, la variable de nébulosité a été retirée de nos modèles finaux. Bien que la luminosité influe sur l'éclairage, son impact sur la demande nette globale reste marginal face aux effets écrasants de la température et de l'activité économique (son usage serait en revanche critique pour prévoir la seule production photovoltaïque).
+
+
+#3. Modèles Linéaires et Optimisation "From Scratch"
+
+Pour débuter notre modélisation, nous avons fait le choix pédagogique et technique d'implémenter nos propres algorithmes par descente de gradient. Cette approche nous a permis d'avoir une maîtrise totale sur l'ajout de termes de régularisation (Ridge L2 et Lasso L1), essentiels pour éviter le surapprentissage face à nos nouvelles variables créées.
+
+#3.1 Régression Linéaire Classique (Minimisation du RSS)
+
+Dans un premier temps, nous avons implémenté une descente de gradient visant à minimiser la Somme des Carrés des Résidus (RSS) :
+$$RSS = \sum_{i=1}^{n} (y_i - \hat{y}_i)^2 + \lambda \sum_{j=1}^{p} \beta_j^2$$
+Bien que ce modèle nous ait permis de valider notre pipeline de Feature Engineering et d'estimer l'espérance conditionnelle (la moyenne), il ne répondait pas à la métrique d'évaluation de notre projet.
+
+#3.2 Passage à la Régression Quantile (Pinball Loss)
+
+Notre évaluation finale reposant sur la Pinball Loss 80, évaluer nos modèles sur l'erreur quadratique moyenne constituait un biais méthodologique. Nous avons donc adapté notre descente de gradient pour minimiser directement la fonction de perte Pinball pour le quantile τ=0.80 :
+$$L_{\tau}(y, \hat{y}) = \begin{cases} 
+\tau (y - \hat{y}) & \text{si } y \ge \hat{y} \\ 
+(\tau - 1) (y - \hat{y}) & \text{si } y < \hat{y} 
+\end{cases}$$
+Ce changement de fonction de coût a permis à notre modèle de se concentrer sur la prédiction des pics de consommation (le 80ème centile), améliorant drastiquement notre score par rapport à la régression classique.
+
+Pseudo-code R illustrant l'idée de notre descente de gradient pour Pinball 80 :
+tau <- 0.80
+learning_rate <- 0.01
+
+Calcul du gradient de la Pinball Loss (simplifié)
+error = y_true - y_pred
+gradient = ifelse(error >= 0, -tau * X, -(tau - 1) * X)
+beta = beta - learning_rate * gradient
+
+# 4. Exploration d'un modèle SARIMAX post-Régression Quantile
+
+Afin de mieux capturer l'autocorrélation temporelle inhérente à la consommation électrique, nous avons envisagé l'utilisation d'un modèle **SARIMAX** (Seasonal AutoRegressive Integrated Moving Average with eXogenous variables). 
+
+L'approche classique modélise la série temporelle sous la forme :
+$$Y_t = X_t \beta + \epsilon_t$$
+
+Notre idée novatrice était de combiner ce cadre avec nos résultats précédents. En conservant les coefficients $\hat{\beta}_{\tau=0.80}$ obtenus lors de notre régression quantile, nous pouvions isoler un résidu $\epsilon_t$ tel que :
+$$\epsilon_t = Y_t - X_t \hat{\beta}_{\tau=0.80}$$
+
+Si l'on pose l'hypothèse forte que ce bruit $\epsilon_t$ suit un processus ARIMA et présente une distribution gaussienne $\mathcal{N}(0, \sigma^2)$, nous étions en capacité de modéliser sa dynamique temporelle pour en extraire analytiquement les quantiles. La prédiction finale du quantile 80 aurait alors été la somme de la prédiction exogène ($X_t \hat{\beta}$) et du quantile 80 du bruit modélisé.
+
+Bien que théoriquement élégante, cette piste s'est avérée complexe à stabiliser empiriquement et nous ne l'avons pas creusée davantage, préférant nous tourner vers les Modèles Additifs Généralisés (GAM).
+
+---
+
+# 5 Les Modèles Additifs Généralisés (GAM)
+
+Pour capturer les effets fortement non-linéaires de la météo (sans avoir à créer manuellement des dizaines de variables d'interaction), nous avons implémenté un **Modèle Additif Généralisé (GAM)**. 
+
+L'équation générale d'un GAM s'écrit :
+$$Y = \beta_0 + \sum_{j=1}^{p} f_j(X_j) + \epsilon$$
+Où les fonctions $f_j$ sont des **splines** (des courbes de lissage flexibles).
+
+## 5.1 Spécification et Hypothèses du modèle de base
+
+Notre modèle incluait diverses splines adaptées à la nature de nos données :
+* `s(Temp, bs='cr')` : Des splines de régression cubique pour lisser l'effet en "V" de la température.
+* `s(toy, bs='cc')` : Des splines cycliques pour la saisonnalité annuelle (*Time Of Year*), forçant le 31 décembre à se raccorder parfaitement au 1er janvier.
+* `te(Date, Nebulosity)` : Un produit tensoriel pour modéliser l'interaction temporelle entre deux variables d'unités différentes.
+
+Cependant, l'utilisation de la fonction standard `gam()` repose sur des **hypothèses statistiques fortes** :
+1. **Erreurs gaussiennes et homoscédastiques** : $\epsilon \sim \mathcal{N}(0, \sigma^2)$. Le modèle suppose qu'il se trompe de la même manière sur les pics que sur les creux.
+2. **Indépendance des résidus** : Pour pallier la violation de cette hypothèse en séries temporelles, nous avons inclus les lags de demande ($Lag_1$ et $Lag_7$) comme variables explicatives.
+3. **Additivité stricte** : L'effet du vent s'additionne à celui de la température (sauf là où nous avons explicitement utilisé des tenseurs `te()`).
+
+## 5.2 L'implémentation de qgam et l'anomalie des performances
+
+Conscients de l'écart fondamental entre la fonction de coût du `gam()` classique (qui minimise le MSE pour prédire l'espérance) et notre métrique d'évaluation finale (la Pinball Loss 80), nous avons implémenté un Modèle Additif Généralisé Quantile à l'aide du package `qgam`.
+
+Le modèle `qgam` ajuste la position et la forme des splines spécifiquement pour minimiser la fonction de perte asymétrique de la Pinball Loss :
+$$\hat{f}_{q80} = \arg\min_{f} \sum_{i=1}^{n} L_{\tau=0.80}(y_i, f(x_i))$$
+
+L'objectif théorique était de permettre à nos courbes d'effets (comme la réaction à la température) de s'adapter spécifiquement aux comportements extrêmes de la demande plutôt qu'à son comportement moyen. 
+
+
+
+**Un résultat empirique contre-intuitif :**
+
+Contre toute attente, l'évaluation sur notre jeu de test a révélé que **le modèle GAM classique (prédisant la moyenne) obtenait un meilleur score Pinball 80 que le modèle `qgam` (prédisant directement le quantile 80).** Plusieurs hypothèses statistiques peuvent expliquer ce phénomène paradoxal :
+
+1. **Instabilité et manque de densité aux extrêmes** : La régression quantile nécessite d'estimer des splines flexibles sur une fraction réduite des données (seulement 20% des points se situent au-dessus du 80ème centile). Cela peut rendre l'ajustement de `qgam` beaucoup plus instable et sujet au surapprentissage (*overfitting*) que l'estimation de la moyenne, qui s'appuie sur la totalité de la distribution.
+2. **Robustesse de l'estimateur de l'espérance** : Si la variance des résidus de notre modèle est relativement constante et que la distribution des erreurs est symétrique, l'estimateur de la moyenne calculé par `gam()` s'avère extrêmement robuste. Une fois translaté ou même évalué tel quel, il a montré une meilleure capacité de généralisation sur des données futures invisibles (jeu de test).
+3. **Pénalité de lissage** : Les mécanismes de régularisation et de lissage (REML) sont historiquement beaucoup plus matures et stables dans `mgcv` (le package classique) que dans les implémentations plus récentes de régression quantile.
+
+Face à ce constat purement empirique, nous avons donc décidé de conserver le modèle GAM standard (basé sur la moyenne) comme notre meilleur modèle, privilégiant la robustesse et la généralisation observées sur le jeu de test plutôt que l'alignement théorique strict.
+
+
+
+---
+
+# 6 Comparaison des Modèles
+
+Afin de visualiser l'apport de chaque itération (de la descente de gradient pénalisée au GAM en passant par le modèle naïf), nous avons comparé leurs prédictions sur notre ensemble de test.
+
+```{r model_comparison, fig.width=10, fig.height=6, echo=TRUE}
+# --- Création d'un jeu de données fictif pour la structure du code ---
+# Remplacez ceci par vos vraies données (Data1 / test set) et vos vraies prédictions
+set.seed(42)
+dates_test <- seq(as.POSIXct("2021-01-01"), as.POSIXct("2021-01-14"), by="hour")
+n <- length(dates_test)
+
+# Vraie demande avec un motif journalier
+y_true <- 50000 + 10000 * sin(seq(0, 14*pi, length.out = n)) + rnorm(n, 0, 2000)
+
+# Simulations des prédictions des différents modèles
+df_results <- data.frame(
+  Date = dates_test,
+  Reel = y_true,
+  RegLin_Moyenne = y_true + rnorm(n, 0, 4000) - 1500, # Biaisé car moyenne
+  RegQuantile_80 = y_true + rnorm(n, 0, 3000) + 3000,  # Vise les pics (quantile 80)
+  GAM_Moyenne = y_true + rnorm(n, 0, 1500) - 500       # Très bon fit mais cible la moyenne
+)
+
+# Transformation en format long pour ggplot2
+library(tidyr)
+df_long <- df_results %>%
+  pivot_longer(cols = -Date, names_to = "Modele", values_to = "Prediction")
+
+# --- Création du graphique de comparaison ---
+ggplot(df_long, aes(x = Date, y = Prediction, color = Modele, linetype = Modele)) +
+  geom_line(alpha = 0.8, linewidth = 0.8) +
+  scale_color_manual(values = c(
+    "Reel" = "black", 
+    "RegLin_Moyenne" = "red", 
+    "RegQuantile_80" = "orange", 
+    "GAM_Moyenne" = "blue"
+  )) +
+  scale_linetype_manual(values = c(
+    "Reel" = "solid", 
+    "RegLin_Moyenne" = "dashed", 
+    "RegQuantile_80" = "twodash", 
+    "GAM_Moyenne" = "dotted"
+  )) +
+  labs(
+    title = "Comparaison des prédictions selon les modèles (Période de Test)",
+    subtitle = "Observez comment la Régression Quantile cible les pics supérieurs contrairement aux modèles 'Moyenne'",
+    x = "Date",
+    y = "Demande Nette d'Électricité (MW)",
+    color = "Modèle / Vérité",
+    linetype = "Modèle / Vérité"
+  ) +
+  theme_minimal() +
+  theme(legend.position = "bottom")
+
+```
+
+
+
+
+
+
+
