@@ -161,21 +161,101 @@ Le modèle linéaire remplit son rôle de **baseline interprétable** :
 **Ses limites sont claires.** D'abord, le bug de pipeline identifié en 3.1 : les degrés-jours et le flag COVID n'étaient pas propagés au test, privant le modèle de transformations qu'il avait apprises. 
 Ensuite, même sans ce bug, un modèle linéaire ne peut pas représenter la relation en "V" entre température et demande sans aide explicite. La saisonnalité hebdomadaire est capturée via les dummies, mais les interactions (par exemple : jour froid un weekend) ne sont pas modélisables sans termes d'interaction explicites. Ces limitations ont motivé notre passage aux modèles non-linéaires (GAM).
 
-# 4. Exploration d'un modèle SARIMAX post-Régression Quantile
+# 4. ARIMA, SARIMA et SARIMAX
 
-Afin de mieux capturer l'autocorrélation temporelle inhérente à la consommation électrique, nous avons envisagé l'utilisation d'un modèle **SARIMAX** (Seasonal AutoRegressive Integrated Moving Average with eXogenous variables). 
+## 4.1 Principe général des modèles ARIMA
 
-L'approche classique modélise la série temporelle sous la forme :
-$$Y_t = X_t \beta + \epsilon_t$$
+Un modèle **ARIMA(p, d, q)** décompose une série temporelle en trois composantes :
 
-Notre idée novatrice était de combiner ce cadre avec nos résultats précédents. En conservant les coefficients $\hat{\beta}_{\tau=0.80}$ obtenus lors de notre régression quantile, nous pouvions isoler un résidu $\epsilon_t$ tel que :
-$$\epsilon_t = Y_t - X_t \hat{\beta}_{\tau=0.80}$$
+- **AR(p)** (AutoRégressif) : la valeur actuelle dépend linéairement des $p$ valeurs passées :
+$$Y_t = \phi_1 Y_{t-1} + \phi_2 Y_{t-2} + \dots + \phi_p Y_{t-p} + \epsilon_t$$
 
-Si l'on pose l'hypothèse forte que ce bruit $\epsilon_t$ suit un processus ARIMA et présente une distribution gaussienne $\mathcal{N}(0, \sigma^2)$, nous étions en capacité de modéliser sa dynamique temporelle pour en extraire analytiquement les quantiles. La prédiction finale du quantile 80 aurait alors été la somme de la prédiction exogène ($X_t \hat{\beta}$) et du quantile 80 du bruit modélisé.
+- **I(d)** (Intégré) : la série est différenciée $d$ fois pour la rendre stationnaire. Une série est stationnaire si sa moyenne et sa variance ne dépendent pas du temps.
 
-Bien que théoriquement élégante, cette piste s'est avérée complexe à stabiliser empiriquement et nous ne l'avons pas creusée davantage, préférant nous tourner vers les Modèles Additifs Généralisés (GAM).
+- **MA(q)** (Moyenne Mobile) : la valeur actuelle dépend des $q$ erreurs passées :
+$$Y_t = \epsilon_t + \theta_1 \epsilon_{t-1} + \dots + \theta_q \epsilon_{t-q}$$
+
+Le modèle ARIMA combine ces trois termes. Pour identifier les bons ordres $p$, $d$, $q$, on utilise classiquement :
+- Le **test ADF** (Augmented Dickey-Fuller) pour tester la stationnarité et choisir $d$
+- Les graphes **ACF** (AutoCorrelation Function) et **PACF** (Partial ACF) pour guider $q$ et $p$
+- Le critère **AIC** pour comparer les modèles en pénalisant la complexité
+
+ARIMA a une limite fondamentale : il ne modélise pas la saisonnalité. Or la demande électrique a une saisonnalité hebdomadaire très marquée (le lundi ressemble au lundi de la semaine précédente, pas au dimanche).
+
+## 4.2 SARIMA : ajout de la saisonnalité
+
+**SARIMA(p, d, q)(P, D, Q, s)** étend ARIMA avec des termes saisonniers de période $s$ :
+
+$$\Phi_P(B^s)\phi_p(B)(1-B^s)^D(1-B)^d Y_t = \Theta_Q(B^s)\theta_q(B)\epsilon_t$$
+
+où $B$ est l'opérateur retard ($B Y_t = Y_{t-1}$) et $s$ est la période saisonnière. 
+Dans notre contexte, $s = 7$ (saisonnalité hebdomadaire sur des données journalières). 
+Les paramètres $(P, D, Q)$ jouent le même rôle que $(p, d, q)$ mais sur les lags saisonniers : le terme AR saisonnier relie $Y_t$ à $Y_{t-7}$, $Y_{t-14}$, etc.
+
+## 4.3 SARIMAX : ajout de variables exogènes
+
+**SARIMAX** ajoute un vecteur de variables exogènes $X_t$ au modèle SARIMA :
+
+$$Y_t = X_t \beta + \text{Sarima}(\text{résidus})$$
+
+Le modèle estime d'abord la contribution des variables externes (température, calendrier, lags de demande), puis modélise la structure temporelle du résidu restant. 
+C'est l'approche hybride que nous avons explorée : utiliser `Net_demand.1` (la vraie valeur du jour précédent) comme variable exogène donne au modèle une information fraîche à chaque pas de prédiction.
 
 ---
+
+## 4.4 Ce que nous avons fait : étape par étape
+
+### Étape 1 — Analyse de stationnarité
+
+Avant de choisir les paramètres, nous avons analysé la série `Net_demand` :
+
+- **Test ADF** sur la série brute et sur la série différenciée au premier ordre
+- **Graphes de moyenne et écart-type glissants** (fenêtre 7 jours) pour inspecter visuellement la stationnarité
+- **ACF et PACF** sur la série brute et différenciée, en cherchant des pics aux lags 7, 14, 21 (signature d'une saisonnalité hebdomadaire)
+- **Décomposition saisonnière additive** sur la série journalière avec période 52 (≈ 365/7)
+
+La saisonnalité hebdomadaire était clairement visible dans les graphes ACF, avec des pics significatifs aux multiples de 7.
+
+### Étape 2 — ARIMA baseline (score ~1200)
+
+Nous avons fait un **grid search** sur les ordres $(p, q) \in \{0,\dots,4\} \times \{0,\dots,3\}$ avec $d = 0$ (la série étant appliquée sur la série déjà différenciée manuellement), en sélectionnant le meilleur modèle par **AIC**.
+
+Le meilleur ARIMA trouvé a ensuite été soumis et a obtenu un **score Pinball d'environ 1200**, ce qui était décevant. Le diagnostic résiduel expliquait pourquoi : le **test de Ljung-Box** aux lags 7, 14 et 21 rejetait l'hypothèse d'indépendance des résidus ($p < 0.05$), et l'ACF des résidus montrait des pics significatifs aux multiples de 7. ARIMA n'avait pas capturé la saisonnalité hebdomadaire, dont la structure restait entièrement dans les résidus.
+
+### Étape 3 — SARIMA naïf (prédiction sur toute la période de test)
+
+Nous avons ajouté les termes saisonniers avec $s = 7$, en faisant un nouveau grid search sur $(P, D, Q) \in \{0,1\} \times \{0,1\} \times \{0,1\}$.
+
+La première approche consistait à **prédire toute la période de test d'un seul coup** (multi-step forecast). Les résultats montraient un phénomène bien connu : les premières prédictions (jours 1 à 3-4) étaient relativement cohérentes avec la réalité, mais après 4-5 jours, les prédictions **convergaient progressivement vers la moyenne de la série**.
+
+Ce comportement n'est pas un bug — c'est une propriété mathématique fondamentale des processus ARIMA. Pour un horizon $h$ tendant vers l'infini, la prévision conditionnelle d'un processus ARIMA stationnaire converge vers la moyenne inconditionnelle de la série :
+$$\lim_{h \to \infty} \mathbb{E}[Y_{t+h} \mid Y_t, Y_{t-1}, \dots] = \mu$$
+
+En pratique, cette convergence est rapide : dès que l'horizon dépasse la portée des termes AR et saisonniers, le modèle "oublie" l'état actuel et revient à sa valeur d'équilibre. Sur une demande électrique avec saisonnalité hebdomadaire, cela se traduit par des prédictions plates après quelques jours.
+
+### Étape 4 — SARIMAX avec prédiction journalière glissante (score ~650)
+
+Pour contourner ce problème, nous avons adopté une **stratégie de prédiction glissante (rolling forecast)** : plutôt que de prédire toute la période d'un coup, on prédit **un jour à la fois**, puis on met à jour l'état interne du modèle avec la vraie valeur observée avant de prédire le jour suivant.
+
+La clé est la variable `Load.1` (la vraie charge du jour précédent), disponible dans `test.csv`. À chaque pas $i$ :
+
+1. On prédit $\hat{Y}_{t_i}$ avec le modèle courant
+2. On récupère la vraie valeur $Y_{t_{i-1}}$ depuis `Load.1`
+3. On met à jour l'état interne du modèle via `.append(new_obs, refit=False)` de statsmodels — ce qui propage la vraie observation sans refaire un entraînement complet
+
+Techniquement, `.append(refit=False)` effectue une mise à jour du filtre de Kalman sous-jacent au modèle SARIMAX (statsmodels utilise une représentation espace-état). 
+Le modèle révise sa distribution a posteriori sur l'état caché à partir de la nouvelle observation, sans modifier les paramètres $\phi, \theta, \Phi, \Theta$ déjà estimés sur les données d'entraînement.
+
+Ce mécanisme donne au modèle un **ancrage local** à chaque nouvelle journée. Il ne prédit plus à 30 jours d'intervalle depuis un état figé, mais à 1 jour depuis un état mis à jour. Le résultat a été spectaculaire : **le score est passé de ~1200 à ~650**, uniquement grâce à ce changement de stratégie de prédiction, sans changer le modèle lui-même.
+
+Nous avons également testé plusieurs combinaisons de paramètres saisonniers $(P, D, Q)$ avec cette stratégie glissante pour affiner davantage le score.
+
+### Bilan de l'approche SARIMA/SARIMAX
+
+SARIMA nous a appris deux choses importantes. D'abord, qu'un modèle de séries temporelles sans saisonnalité explicite est insuffisant pour la demande électrique : les résidus d'ARIMA contenaient encore toute la structure hebdomadaire, ce que le test de Ljung-Box a clairement confirmé. 
+Ensuite, que la **stratégie de prédiction** (naïve vs glissante) peut avoir autant d'impact sur le score que le choix du modèle lui-même — passer de multi-step à rolling a divisé le score par presque deux.
+
+La limite principale de SARIMAX reste sa nature **univariée** (ou faiblement multivariée) : il modélise la dynamique temporelle de la série, mais ne capte pas les effets non linéaires de la température ou du calendrier aussi bien qu'un modèle de machine learning dédié. C'est ce qui a motivé notre passage vers les GAM.
 
 # 5 Les Modèles Additifs Généralisés (GAM)
 
