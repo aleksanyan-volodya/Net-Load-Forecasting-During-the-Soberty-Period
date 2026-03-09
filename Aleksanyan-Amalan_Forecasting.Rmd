@@ -71,8 +71,6 @@ Les features effectivement utilisées par le modèle sont celles présentes **da
 La nébulosité brute et pondérée est explicitement exclue (voir section 2.3).
 
 **Limite de pipeline (features non propagées au test) :** Lors de la préparation des données, trois features avaient été construites sur les données d'entraînement mais n'ont pas été recréées pour le jeu de test :
-- `Heating_Degree` = $\max(0,\ 288.15 - \text{Temp})$
-- `Cooling_Degree` = $\max(0,\ \text{Temp} - 295.15)$
 - `Covid_Flag` = $\mathbb{1}[\text{Date} \geq \text{17 mars 2020}]$
 
 L'instruction `X_test.reindex(columns=X_train.columns, fill_value=0.0)` les a remplies silencieusement avec zéro pour toutes les observations de test. 
