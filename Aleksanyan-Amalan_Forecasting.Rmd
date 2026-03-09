@@ -252,10 +252,45 @@ Nous avons également testé plusieurs combinaisons de paramètres saisonniers $
 
 ### Bilan de l'approche SARIMA/SARIMAX
 
-SARIMA nous a appris deux choses importantes. D'abord, qu'un modèle de séries temporelles sans saisonnalité explicite est insuffisant pour la demande électrique : les résidus d'ARIMA contenaient encore toute la structure hebdomadaire, ce que le test de Ljung-Box a clairement confirmé. 
+SARIMA nous a appris deux choses importantes. D'abord, qu'un modèle de séries temporelles sans saisonnalité explicite est insuffisant pour la demande électrique : les résidus d'ARIMA contenaient encore toute la structure hebdomadaire, ce que le test de Ljung-Box a clairement confirmé.
 Ensuite, que la **stratégie de prédiction** (naïve vs glissante) peut avoir autant d'impact sur le score que le choix du modèle lui-même — passer de multi-step à rolling a divisé le score par presque deux.
 
 La limite principale de SARIMAX reste sa nature **univariée** (ou faiblement multivariée) : il modélise la dynamique temporelle de la série, mais ne capte pas les effets non linéaires de la température ou du calendrier aussi bien qu'un modèle de machine learning dédié. C'est ce qui a motivé notre passage vers les GAM.
+
+## 4.5 Décomposition de la prédiction : Load, Solar et Wind séparément
+
+### L'idée et son origine
+
+La demande nette est définie par :
+$$\text{Net\_demand} = \text{Load} - \text{Solar\_power} - \text{Wind\_power}$$
+
+Plutôt que de prédire `Net_demand` directement, on peut prédire séparément chacun des trois termes, puis les combiner. Cette idée nous avait été soufflée en observant l'approche d'un autre groupe (MAP&IA) qui avait utilisé trois GAM distincts pour les trois composantes.
+
+Nous y avions pensé dès le début, mais nous l'avions mise de côté sur la régression linéaire pour une raison précise : additionner trois modèles, c'est additionner trois sources d'erreur. Si chaque modèle a une erreur résiduelle $\epsilon_i$, l'erreur finale sur `Net_demand` est $\epsilon_{\text{Load}} + \epsilon_{\text{Solar}} + \epsilon_{\text{Wind}}$, ce qui peut être pire qu'une seule erreur directe selon la covariance entre ces erreurs. Nous avions donc jugé que pour un modèle linéaire simple, la prédiction directe de `Net_demand` était plus sûre.
+
+Nous avons repris cette idée dans le cadre SARIMAX, où la décomposition prend plus de sens : chacune des trois séries a une **dynamique temporelle propre**, et un modèle unique sur `Net_demand` mélange des processus de natures très différentes.
+
+### SARIMAX sur Load (résultat satisfaisant)
+
+`Load` est la consommation brute d'électricité. Elle suit des patterns saisonniers très réguliers (journalier, hebdomadaire, annuel), ce qui la rend bien adaptée à un modèle SARIMAX avec rolling forecast. Les prédictions obtenues sur le jeu de test (`Load_forecast` dans `sarimax_rolling_forecasts.csv`) donnent des valeurs autour de 40 000–45 000 MW, cohérentes avec les ordres de grandeur attendus.
+
+### SARIMAX sur Solar power (résultat acceptable)
+
+`Solar_power` est plus complexe : la production photovoltaïque varie fortement selon la saison, l'heure de la journée et la nébulosité. Nous avons testé un SARIMAX légèrement plus élaboré sur cette série, en tenant compte de la saisonnalité journalière. Les prédictions (`sarimax_solar_rolling_forecasts_q06.csv`) sont dans l'ordre de grandeur attendu (~2 000–3 000 MW), même si la qualité de l'ajustement est moins bonne que pour `Load`.
+
+### Wind power : une série difficile à modéliser
+
+`Wind_power` est le terme le plus problématique des trois. Contrairement à `Load` ou `Solar_power`, la production éolienne ne suit pas de pattern temporel facilement exploitable. Elle dépend de la météo locale à court terme — direction, vitesse, variabilité du vent — ce qui en fait en grande partie une série **aléatoire à l'échelle de quelques jours**.
+
+Nous avons cherché des approches dans la littérature, et il ressort que les modèles dits **"boîte noire"** — réseaux de neurones récurrents (LSTM), forêts aléatoires, gradient boosting — obtiennent généralement de meilleurs résultats sur la prédiction éolienne que les modèles statistiques classiques. La raison est que ces modèles peuvent capturer des interactions complexes entre variables exogènes (température, vent spatialisé, saison) sans hypothèse de structure.
+
+Nous avons finalement modélisé `Wind_power` avec **XGBoost**, ce qui a produit des prédictions numériquement raisonnables visuellement raisonnables (`xgboost_wind_forecasts.csv`). Cependant, nous avons remarqué que le processus de choix des hyperparamètres (profondeur des arbres, taux d'apprentissage, nombre d'estimateurs) était difficile à justifier : on peut faire varier ces paramètres et observer l'effet sur la validation, mais il est compliqué de donner une intuition statistique claire sur *pourquoi* telle valeur est meilleure qu'une autre, contrairement à $\lambda$ dans Ridge ou à $s$ dans SARIMA.
+
+### Pourquoi nous n'avons pas poussé plus loin les modèles boîte noire
+
+Ce constat sur XGBoost rejoint la philosophie générale de notre projet : nous voulions comprendre les mécanismes des modèles, pas seulement en observer les sorties. 
+Les modèles de deep learning appliqués aux séries temporelles (LSTM, Transformer, etc.) peuvent certainement mieux performer sur `Wind_power`, mais leur interprétation est difficile, en tout cas à notre échelle, et les implémenter correctement en deux semaines sans copier du code existant aurait été une tâche à part entière. 
+Nous avons donc fait le choix de ne pas aller dans cette direction, en considérant que reproduire un modèle sans en comprendre le fonctionnement serait contraire à notre objectif.
 
 # 5 Les Modèles Additifs Généralisés (GAM)
 
