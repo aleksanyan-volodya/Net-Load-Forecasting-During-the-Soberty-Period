@@ -13,11 +13,15 @@ library(lubridate)
 # library(qgam) # Sera utilisé plus tard
 ```
 
-#Introduction
+# Introduction
 
-La prévision de la demande nette d'électricité est un enjeu crucial pour l'équilibre du réseau. Ce projet s'inscrit dans un contexte particulièrement complexe englobant notamment la période de la pandémie de COVID-19, caractérisée par des ruptures soudaines dans les comportements de consommation.
+La prévision de la demande nette d'électricité est un problème de séries temporelles avec des contraintes réelles fortes : saisonnalités multiples, effets météorologiques non linéaires, ruptures structurelles, et une métrique d'évaluation asymétrique (la Pinball Loss).
 
-L'objectif de cette étude est de prédire la demande électrique en obtenant le meilleur score (plus faible erreur de prévision) private set sur la Pinball Loss au quantile 80%. Pour ce faire, nous avons adopté une démarche itérative, allant de l'implémentation d'algorithmes d'optimisation from scratch, pour un contrôle total des pénalités, à l'utilisation de modèles statistiques avancés comme SARIMAX et GAM.
+Ce projet est encadré par un enseignant, mais nous avons choisi d'en faire une démarche volontairement exploratoire. Notre objectif principal n'était pas de minimiser le score de soumission, mais de nous confronter à plusieurs familles de modèles de machine learning appliqués aux séries temporelles, avant même d'en avoir vu certains en cours. Nous voulions comprendre par nous-mêmes comment ces méthodes fonctionnent, quelles sont leurs hypothèses, et dans quels cas elles échouent.
+
+Concrètement, cela a signifié que nous avons souvent implémenté du code en partant de ressources en ligne (documentation, articles, forums) plutôt que d'utiliser des squelettes fournis. Nous avons écrit notre propre descente de gradient, nos propres fonctions de préparation de données, plutôt que de déléguer cela entièrement à des librairies (ou aux IA)
+
+Nous sommes conscients que pour obtenir un meilleur score, il aurait fallu investir davantage dans le pré-traitement des données, la sélection de features, et le réglage des hyperparamètres. Nous avons fait le choix inverse : explorer un maximum de modèles différents (régression linéaire, SARIMAX, GAM, XGBoost), même imparfaitement, parce que cette diversité d'expérience nous sera plus utile que d'optimiser un unique modèle. Ce rapport documente cette démarche, y compris les erreurs de pipeline et les résultats que nous avons rencontrés.
 
 
 #2. Feature Engineering
@@ -38,33 +42,121 @@ La crise sanitaire a provoqué une chute brutale de la consommation industrielle
 Après analyse, la variable de nébulosité a été retirée de nos modèles finaux. Bien que la luminosité influe sur l'éclairage, son impact sur la demande nette globale reste marginal face aux effets écrasants de la température et de l'activité économique (son usage serait en revanche critique pour prévoir la seule production photovoltaïque).
 
 
-#3. Modèles Linéaires et Optimisation "From Scratch"
+# 3. Modèles Linéaires et Optimisation "From Scratch"
 
-Pour débuter notre modélisation, nous avons fait le choix pédagogique et technique d'implémenter nos propres algorithmes par descente de gradient. Cette approche nous a permis d'avoir une maîtrise totale sur l'ajout de termes de régularisation (Ridge L2 et Lasso L1), essentiels pour éviter le surapprentissage face à nos nouvelles variables créées.
+Pour débuter notre modélisation, nous avons implémenté nos propres algorithmes d'optimisation en Python (classe `LinearModel`), sans dépendre de librairies comme `scikit-learn`. 
+Ce choix n'est pas anodin : il nous a permis de contrôler précisément la fonction de perte minimisée, 
+ce que les API standard ne permettaient pas à notre connaissance pour la perte Pinball avec régularisation simultanée.
 
-#3.1 Régression Linéaire Classique (Minimisation du RSS)
+## 3.1 Préparation des données pour la descente de gradient
 
-Dans un premier temps, nous avons implémenté une descente de gradient visant à minimiser la Somme des Carrés des Résidus (RSS) :
-$$RSS = \sum_{i=1}^{n} (y_i - \hat{y}_i)^2 + \lambda \sum_{j=1}^{p} \beta_j^2$$
-Bien que ce modèle nous ait permis de valider notre pipeline de Feature Engineering et d'estimer l'espérance conditionnelle (la moyenne), il ne répondait pas à la métrique d'évaluation de notre projet.
+La descente de gradient est sensible à l'échelle des variables.
+Si une feature vaut ~300 (température en Kelvin par exemple) et une autre vaut 1 (flag binaire), leurs gradients sont de magnitudes très différentes,
+ce qui ralentit ou déstabilise la convergence.
 
-#3.2 Passage à la Régression Quantile (Pinball Loss)
+Nous avons normalisé uniquement les variables continues en les centrant et réduisant :
+$$\tilde{X}_j = \frac{X_j - \bar{X}_j}{s_j}$$
+Les variables binaires (jours de la semaine en one-hot, indicateurs de jours fériés) ont été laissées telles quelles.
 
-Notre évaluation finale reposant sur la Pinball Loss 80, évaluer nos modèles sur l'erreur quadratique moyenne constituait un biais méthodologique. Nous avons donc adapté notre descente de gradient pour minimiser directement la fonction de perte Pinball pour le quantile τ=0.80 :
-$$L_{\tau}(y, \hat{y}) = \begin{cases} 
-\tau (y - \hat{y}) & \text{si } y \ge \hat{y} \\ 
-(\tau - 1) (y - \hat{y}) & \text{si } y < \hat{y} 
-\end{cases}$$
-Ce changement de fonction de coût a permis à notre modèle de se concentrer sur la prédiction des pics de consommation (le 80ème centile), améliorant drastiquement notre score par rapport à la régression classique.
+Les features effectivement utilisées par le modèle sont celles présentes **dans les deux fichiers** `train.csv` et `test.csv` :
 
-Pseudo-code R illustrant l'idée de notre descente de gradient pour Pinball 80 :
-tau <- 0.80
-learning_rate <- 0.01
+- **Température brute et ses agrégats spatiaux** : `Temp`, `Temp_s95`, `Temp_s99`, `Temp_s95_min`, `Temp_s95_max`, `Temp_s99_min`, `Temp_s99_max`
+- **Vent** : `Wind`, `Wind_weighted`
+- **Calendrier** : `toy` (time of year), `Year`, `Month`, `DLS`, `WeekDays` (one-hot, 6 colonnes)
+- **Jours particuliers** : `BH`, `BH_before`, `BH_after`, `BH_Holiday`, `Holiday`, `Holiday_zone_a/b/c`, `Summer_break`, `Christmas_break`
+- **Variables retardées (lags)** : `Load.1`, `Load.7`, `Net_demand.1`, `Net_demand.7`, `Solar_power.1`, `Solar_power.7`, `Wind_power.1`, `Wind_power.7`
 
-Calcul du gradient de la Pinball Loss (simplifié)
-error = y_true - y_pred
-gradient = ifelse(error >= 0, -tau * X, -(tau - 1) * X)
-beta = beta - learning_rate * gradient
+La nébulosité brute et pondérée est explicitement exclue (voir section 2.3).
+
+**Limite de pipeline (features non propagées au test) :** Lors de la préparation des données, trois features avaient été construites sur les données d'entraînement mais n'ont pas été recréées pour le jeu de test :
+- `Heating_Degree` = $\max(0,\ 288.15 - \text{Temp})$
+- `Cooling_Degree` = $\max(0,\ \text{Temp} - 295.15)$
+- `Covid_Flag` = $\mathbb{1}[\text{Date} \geq \text{17 mars 2020}]$
+
+L'instruction `X_test.reindex(columns=X_train.columns, fill_value=0.0)` les a remplies silencieusement avec zéro pour toutes les observations de test. 
+Ces features ont donc été apprises par le modèle mais sont restées constamment nulles lors des prédictions finales, ce qui revient à les ignorer complètement. Le modèle s'est ainsi appuyé uniquement sur la température brute pour l'effet thermique, sans la transformation en degrés-jours souhaitée.
+
+## 3.2 Régression Linéaire (minimisation du RMSE) comme baseline
+
+Le modèle linéaire s'écrit :
+$$\hat{y} = X\beta + b$$
+avec $X \in \mathbb{R}^{n \times p}$ la matrice de features, $\beta \in \mathbb{R}^p$ les poids et $b$ le biais.
+
+En minimisant le RMSE, on cherche :
+$$\hat{\beta} = \arg\min_{\beta} \frac{1}{n} \sum_{i=1}^{n} (y_i - \hat{y}_i)^2$$
+
+La mise à jour par descente de gradient à l'itération $t$ est :
+$$\beta^{(t+1)} = \beta^{(t)} - \alpha \cdot \nabla_\beta \mathcal{L}$$
+avec le gradient :
+$$\nabla_\beta \mathcal{L}_{\text{RMSE}} = \frac{2}{n} X^\top (X\beta - y)$$
+
+Nous avons utilisé `learning_rate = 0.02` et `maxIter = 10000`. Ce modèle converge proprement et nous a permis de valider que le pipeline de données fonctionnait.
+
+**Limite fondamentale :** Ce modèle estime $\mathbb{E}[Y \mid X]$, c'est-à-dire la demande *moyenne* conditionnelle. Or notre métrique d'évaluation est la **Pinball Loss au quantile 80%**, et non la moyenne. Utiliser ce modèle directement pour la soumission constitue donc un biais méthodologique.
+
+## 3.3 Régression Quantile par descente de gradient (Pinball Loss)
+
+Pour corriger ce biais, nous avons adapté la descente de gradient pour minimiser directement la **Pinball Loss** (aussi appelée *Quantile Loss*) au quantile $\tau = 0.80$ :
+
+$$\mathcal{L}_{\tau}(y, \hat{y}) = \frac{1}{n}\sum_{i=1}^{n} \rho_\tau(y_i - \hat{y}_i)$$
+
+où la fonction "check" $\rho_\tau$ est définie par :
+
+$$\rho_\tau(r) = \begin{cases} \tau \cdot r & \text{si } r \geq 0 \\ (\tau - 1) \cdot r & \text{si } r < 0 \end{cases}$$
+
+Cette fonction est asymétrique : elle pénalise **4 fois plus** une sous-estimation qu'une surestimation ($\tau = 0.8$ implique un ratio $0.8 / 0.2 = 4$). Le modèle est donc naturellement poussé à prédire des valeurs hautes, ciblant les pics de consommation.
+
+La Pinball Loss n'est pas différentiable en zéro. Le gradient par rapport aux poids s'écrit néanmoins presque partout :
+
+$$\nabla_\beta \mathcal{L}_{\tau} = \frac{1}{n} X^\top \cdot \mathbf{g}$$
+
+où $\mathbf{g}_i = \mathbb{1}[\hat{y}_i > y_i] - \tau$, ce qui donne :
+- $g_i = 1 - \tau = 0.2$ si $\hat{y}_i > y_i$ (surestimation, pénalité faible)
+- $g_i = -\tau = -0.8$ si $\hat{y}_i \leq y_i$ (sous-estimation, pénalité forte)
+
+Nous avons utilisé `learning_rate = 0.02` et `maxIter = 17000` (plus d'itérations car la Pinball Loss est plus difficile à descendre que le RMSE). Un critère de convergence précoce s'arrête si l'objectif passe sous $10^{-6}$.
+
+**Vérification empirique de la calibration :** À la fin de l'entraînement, on vérifie que $P(\hat{y} \geq y) \approx \tau = 0.80$. Si cette couverture est trop éloignée de 80%, c'est un signal que la descente n'a pas convergé ou que le learning rate est inadapté.
+
+**Résultat obtenu et bug constaté :** En pratique, les prédictions finales de ce modèle sont de l'ordre de **470 MW**, là où la demande réelle est autour de **39 000 MW**. Ce résultat est clairement absurde et ne peut pas s'expliquer uniquement par le bug de pipeline décrit en 3.1.
+
+La cause probable est un problème de normalisation asymétrique : les features de `X_test` ont été normalisées avec les statistiques calculées sur `X_train` (moyennes et écarts-types de l'entraînement), mais certaines colonnes présentes en train et absentes en test (comme les degrés-jours) sont remplies avec `fill_value=0.0` **avant** la normalisation, ce qui correspond à une valeur hors distribution. Le modèle, dont les poids ont été appris sur des features normalisées dans un certain intervalle, reçoit des entrées dans un espace différent et produit des prédictions hors échelle.
+
+Nous comprenons bien ce que ce modèle est censé faire : si le pipeline était correct, la descente de gradient devrait converger vers des poids $\beta$ tels que, pour chaque observation, $\hat{y}_i$ dépasse la vraie valeur $y_i$ dans environ 80% des cas. Le modèle apprendrait à se décaler vers le haut par rapport à la moyenne, ciblant les pics de consommation plutôt que le niveau moyen. Ce principe est valide, c'est l'implémentation du pipeline qui n'a pas fonctionné comme prévu.
+
+## 3.4 Régularisation L1 et L2
+
+Pour éviter le surapprentissage et réduire l'influence des features peu informatives, nous avons ajouté un terme de pénalité sur les poids.
+
+**Ridge (L2) :** on pénalise la norme euclidienne des poids :
+$$\mathcal{L}_{\text{Ridge}} = \mathcal{L}_{\tau} + \lambda \sum_{j=1}^{p} \beta_j^2$$
+Le gradient de la pénalité est $2\lambda\beta$, ce qui pousse progressivement tous les poids vers zéro mais ne les annule jamais complètement.
+
+**Lasso (L1) :** on pénalise la norme $L_1$ des poids :
+$$\mathcal{L}_{\text{Lasso}} = \mathcal{L}_{\tau} + \lambda \sum_{j=1}^{p} |\beta_j|$$
+Le gradient de la pénalité est $\lambda \cdot \text{sign}(\beta)$. Cette pénalité peut annuler complètement des coefficients, produisant une sélection automatique de variables. Elle est statistiquement équivalente à poser une prior de Laplace sur $\beta$.
+
+Le biais $b$ n'est pas régularisé (ni en L1 ni en L2), conformément à la pratique standard.
+
+Nous avons conduit un sweep de valeurs de $\lambda$ allant de $0$ à $10$ sur un split temporel train/validation (80/20), en mesurant la Pinball Loss de validation, la couverture $P(\hat{y} \geq y)$ et la norme $\|\beta\|_2$. Les résultats sont sauvegardés dans `regularization_experiments_summary.csv`.
+
+**Ce que nous avons observé :** Les $\lambda$ très élevés ($\lambda \geq 1$) dégradent la performance, car ils forcent tous les poids vers zéro, perdant ainsi l'information des features. Les $\lambda$ très faibles ($\lambda \leq 10^{-6}$) sont pratiquement équivalents à aucune régularisation. La zone utile se situe entre $10^{-4}$ et $10^{-2}$, avec des gains modestes sur le jeu de validation. Ce résultat indique que la régularisation n'est pas le levier principal ici : le vrai problème est la non-linéarité de la relation température–demande, que le modèle linéaire ne peut pas capturer seul.
+
+## 3.5 Importance des variables (analyse des coefficients)
+
+Une propriété utile du modèle linéaire est que les coefficients $\beta_j$ sont directement interprétables **après normalisation** : leur valeur absolue mesure l'impact marginal de chaque variable sur la prévision.
+
+Sur le modèle Pinball entraîné, nous avons classé les features par $|\beta_j|$ décroissant pour identifier les variables les plus influentes. Les variables de température brute (`Temp`, `Temp_s95`) et les features retardées (`Net_demand.1`, `Net_demand.7`) ressortent en tête, confirmant que la demande électrique est très autocorrélée et très thermosensible. Les indicateurs calendaires (`toy`, `WeekDays`) arrivent ensuite.
+
+## 3.6 Bilan du modèle linéaire
+
+Le modèle linéaire remplit son rôle de **baseline interprétable** :
+
+- Le score de soummission est de 540
+- La régularisation apporte un gain marginal sur le jeu de validation, ce qui suggère que le problème principal n'est pas le surapprentissage mais bien la capacité expressive du modèle.
+
+**Ses limites sont claires.** D'abord, le bug de pipeline identifié en 3.1 : les degrés-jours et le flag COVID n'étaient pas propagés au test, privant le modèle de transformations qu'il avait apprises. 
+Ensuite, même sans ce bug, un modèle linéaire ne peut pas représenter la relation en "V" entre température et demande sans aide explicite. La saisonnalité hebdomadaire est capturée via les dummies, mais les interactions (par exemple : jour froid un weekend) ne sont pas modélisables sans termes d'interaction explicites. Ces limitations ont motivé notre passage aux modèles non-linéaires (GAM).
 
 # 4. Exploration d'un modèle SARIMAX post-Régression Quantile
 
