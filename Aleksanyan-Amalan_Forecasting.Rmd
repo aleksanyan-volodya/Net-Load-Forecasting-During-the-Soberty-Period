@@ -35,7 +35,9 @@ Afin de modéliser cet effet, nous avons créé des variables de degrés-jours d
 
 ##2.2 La Rupture Structurelle du COVID-19
 
-La crise sanitaire a provoqué une chute brutale de la consommation industrielle et tertiaire. L'ajout d'une variable binaire Covid_Flag s'est avéré indispensable. Sans cette variable, tout modèle d'apprentissage tendrait à lisser la prévision, produisant une moyenne entre la période "normale" et la période "confinée", ce qui génèrerait des erreurs systématiques sur les deux fenêtres temporelles.
+Les données d'entraînement couvrent la période 2013–2022, qui inclut le confinement de mars 2020. L'idée était d'ajouter une variable binaire `Covid_Flag` pour signaler au modèle cette rupture structurelle : sans elle, le modèle risque d'apprendre une moyenne entre la période normale et la période confinée, produisant des prédictions systématiquement biaisées sur les deux fenêtres.
+
+Dans la pratique, ce flag a été créé sur les données d'entraînement mais n'a jamais été propagé correctement au jeu de test (voir section 3.1). Le jeu de test couvre la période de sobriété électrique de l'automne 2022, postérieure au confinement : toutes les observations test devraient avoir `Covid_Flag = 1`, mais le bug de pipeline leur a attribué `0`. L'intention était correcte ; l'implémentation ne l'a pas suivi.
 
 ##2.3 Éviction de la Nébulosité
 
@@ -146,7 +148,8 @@ Nous avons conduit un sweep de valeurs de $\lambda$ allant de $0$ à $10$ sur un
 
 Une propriété utile du modèle linéaire est que les coefficients $\beta_j$ sont directement interprétables **après normalisation** : leur valeur absolue mesure l'impact marginal de chaque variable sur la prévision.
 
-Sur le modèle Pinball entraîné, nous avons classé les features par $|\beta_j|$ décroissant pour identifier les variables les plus influentes. Les variables de température brute (`Temp`, `Temp_s95`) et les features retardées (`Net_demand.1`, `Net_demand.7`) ressortent en tête, confirmant que la demande électrique est très autocorrélée et très thermosensible. Les indicateurs calendaires (`toy`, `WeekDays`) arrivent ensuite.
+Nous avons bien implémenté ce classement dans le notebook (tri par $|\beta_j|$ décroissant). Cependant, étant donné que le modèle Pinball produit des prédictions de l'ordre de 470 MW (section 3.3), les poids appris sont le résultat d'une descente de gradient sur un espace de features incohérent. 
+Il n'est donc pas raisonnable d'interpréter ces coefficients comme des mesures d'importance réelle des variables.
 
 ## 3.6 Bilan du modèle linéaire
 
@@ -187,7 +190,7 @@ Où les fonctions $f_j$ sont des **splines** (des courbes de lissage flexibles).
 Notre modèle incluait diverses splines adaptées à la nature de nos données :
 * `s(Temp, bs='cr')` : Des splines de régression cubique pour lisser l'effet en "V" de la température.
 * `s(toy, bs='cc')` : Des splines cycliques pour la saisonnalité annuelle (*Time Of Year*), forçant le 31 décembre à se raccorder parfaitement au 1er janvier.
-* `te(Date, Nebulosity)` : Un produit tensoriel pour modéliser l'interaction temporelle entre deux variables d'unités différentes.
+* Des tenseurs `te()` pour modéliser des interactions entre variables d'unités différentes, notamment entre la date et d'autres variables météo.
 
 Cependant, l'utilisation de la fonction standard `gam()` repose sur des **hypothèses statistiques fortes** :
 1. **Erreurs gaussiennes et homoscédastiques** : $\epsilon \sim \mathcal{N}(0, \sigma^2)$. Le modèle suppose qu'il se trompe de la même manière sur les pics que sur les creux.
@@ -224,55 +227,51 @@ Face à ce constat purement empirique, nous avons donc décidé de conserver le 
 Afin de visualiser l'apport de chaque itération (de la descente de gradient pénalisée au GAM en passant par le modèle naïf), nous avons comparé leurs prédictions sur notre ensemble de test.
 
 ```{r model_comparison, fig.width=10, fig.height=6, echo=TRUE}
-# --- Création d'un jeu de données fictif pour la structure du code ---
-# Remplacez ceci par vos vraies données (Data1 / test set) et vos vraies prédictions
+# Illustration pédagogique du principe de la régression quantile.
+# Ce graphique montre ce qu'un modèle linéaire RMSE et un modèle GAM
+# sont censés produire sur la période de test.
+# La régression quantile (Pinball) n'est pas représentée ici car
+# notre implémentation a produit des prédictions hors échelle (~470 MW)
+# due au bug de pipeline décrit en section 3.1 et 3.3.
 set.seed(42)
-dates_test <- seq(as.POSIXct("2021-01-01"), as.POSIXct("2021-01-14"), by="hour")
+dates_test <- seq(as.POSIXct("2022-09-01"), as.POSIXct("2022-09-14"), by="hour")
 n <- length(dates_test)
 
-# Vraie demande avec un motif journalier
-y_true <- 50000 + 10000 * sin(seq(0, 14*pi, length.out = n)) + rnorm(n, 0, 2000)
+y_true <- 39000 + 5000 * sin(seq(0, 14*pi, length.out = n)) + rnorm(n, 0, 1000)
 
-# Simulations des prédictions des différents modèles
 df_results <- data.frame(
   Date = dates_test,
   Reel = y_true,
-  RegLin_Moyenne = y_true + rnorm(n, 0, 4000) - 1500, # Biaisé car moyenne
-  RegQuantile_80 = y_true + rnorm(n, 0, 3000) + 3000,  # Vise les pics (quantile 80)
-  GAM_Moyenne = y_true + rnorm(n, 0, 1500) - 500       # Très bon fit mais cible la moyenne
+  RegLin_RMSE = y_true + rnorm(n, 0, 3000) - 1000,
+  GAM_Moyenne = y_true + rnorm(n, 0, 800)
 )
 
-# Transformation en format long pour ggplot2
 library(tidyr)
 df_long <- df_results %>%
   pivot_longer(cols = -Date, names_to = "Modele", values_to = "Prediction")
 
-# --- Création du graphique de comparaison ---
 ggplot(df_long, aes(x = Date, y = Prediction, color = Modele, linetype = Modele)) +
   geom_line(alpha = 0.8, linewidth = 0.8) +
   scale_color_manual(values = c(
-    "Reel" = "black", 
-    "RegLin_Moyenne" = "red", 
-    "RegQuantile_80" = "orange", 
+    "Reel" = "black",
+    "RegLin_RMSE" = "red",
     "GAM_Moyenne" = "blue"
   )) +
   scale_linetype_manual(values = c(
-    "Reel" = "solid", 
-    "RegLin_Moyenne" = "dashed", 
-    "RegQuantile_80" = "twodash", 
+    "Reel" = "solid",
+    "RegLin_RMSE" = "dashed",
     "GAM_Moyenne" = "dotted"
   )) +
   labs(
-    title = "Comparaison des prédictions selon les modèles (Période de Test)",
-    subtitle = "Observez comment la Régression Quantile cible les pics supérieurs contrairement aux modèles 'Moyenne'",
+    title = "Illustration : prédictions Régression Linéaire vs GAM (données simulées)",
+    subtitle = "Les données ici sont simulées à titre illustratif — les vrais résultats sont dans les fichiers de soumission",
     x = "Date",
     y = "Demande Nette d'Électricité (MW)",
-    color = "Modèle / Vérité",
-    linetype = "Modèle / Vérité"
+    color = "Modèle",
+    linetype = "Modèle"
   ) +
   theme_minimal() +
   theme(legend.position = "bottom")
-
 ```
 
 
