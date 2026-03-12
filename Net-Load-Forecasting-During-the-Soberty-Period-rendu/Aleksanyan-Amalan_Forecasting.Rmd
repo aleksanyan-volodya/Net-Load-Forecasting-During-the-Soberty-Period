@@ -39,6 +39,7 @@ $$\text{Cooling\_Degree}_t = \max(T_t - T_{\text{ref}},\ 0)$$
 où $T_{\text{ref}} = 15^\circ$C est le seuil de confort typique utilisé dans la littérature. Ces deux termes encodent conjointement la forme en "V" de la relation température–demande : en dessous de $T_{\text{ref}}$, le chauffage augmente proportionnellement avec le froid ; en été, la climatisation crée une pente opposée.
 
 [ajouter le graphe de la relation en V entre la température et Net_demand, avec les deux régimes chauffage et refroidissement visibles]
+![relation en V entre la température et Net_demand, avec les deux régimes chauffage et refroidissement](images/temp-netdemand.png)
 
 ##2.2 La Rupture Structurelle du COVID-19
 
@@ -205,7 +206,8 @@ où $\hat{L}$ est la vraisemblance maximisée du modèle et $k$ le nombre de par
 
 La règle de lecture classique des graphes ACF/PACF est la suivante : si le PACF coupe net après le lag $p$ et que l'ACF décroît exponentiellement, cela suggère un processus AR($p$) ; si l'ACF coupe net après le lag $q$ et le PACF décroît, cela suggère un MA($q$). Des pics significatifs aux multiples de $s$ dans les deux graphes indiquent une saisonnalité à la période $s$.
 
-[ajouter les graphes ACF et PACF de la série Net_demand brute, avec les pics aux lags 7, 14, 21 bien visibles]
+
+![Graphes ACF et PACF de la série Net_demand brute](images/acf.png)
 
 ARIMA a une limite fondamentale : il ne modélise pas la saisonnalité. Or la demande électrique a une saisonnalité hebdomadaire très marquée (le lundi ressemble au lundi de la semaine précédente, pas au dimanche).
 
@@ -388,8 +390,7 @@ Un outil de diagnostic complémentaire est la vérification des **degrés de lib
 
 Sur la base de cette comparaison, **GAM 8** a été retenu comme meilleur modèle et ses prédictions ont été soumises.
 
-Effets partiels estimés de GAM 8 : s(toy), s(Temp), te(Temp, Wind)  et non-linéarités capturées par les splines :
-Voici les effets partiels estimés pour évaluer les non-linéarités :
+Voici les effets partiels estimés pour évaluer les non-linéarités capturées par les splines :
 
 ```{r effets-partiels, echo=FALSE, fig.cap="Effets partiels estimés de GAM 8", fig.width=8, fig.height=4}
 train$Time <- as.numeric(train$Date)
