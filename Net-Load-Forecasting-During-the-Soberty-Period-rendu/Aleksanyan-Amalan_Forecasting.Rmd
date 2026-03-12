@@ -1,0 +1,517 @@
+---
+title: "Aleksanyan-Amalan_Forecasting"
+output: html_document
+date: "2026-03-03"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+# Chargement des librairies principales
+library(ggplot2)
+library(dplyr)
+library(lubridate)
+# library(qgam) # Sera utilisé plus tard
+```
+
+# Introduction
+
+La prévision de la demande nette d'électricité est un problème de séries temporelles avec des contraintes réelles fortes comme les saisonnalités multiples, les effets météorologiques non linéaires, les ruptures structurelles, et une métrique d'évaluation asymétrique (la Pinball Loss).
+
+Ce projet, encadré par un enseignant, a été fait dans une démarche volontairement exploratoire. Notre objectif principal n'était pas de minimiser le score de soumission, mais de nous confronter à plusieurs familles de modèles de machine learning appliqués aux séries temporelles, avant même d'en avoir vu certains en cours. Nous voulions comprendre par nous-mêmes comment ces méthodes fonctionnaient, quelles étaient leurs hypothèses, et dans quels cas elles échouaient.
+
+Concrètement, nous avons souvent implémenté du code en partant de ressources en ligne (documentation, articles, forums) plutôt que d'utiliser des squelettes fournis. Nous avons écrit notre propre descente de gradient, nos propres fonctions de préparation de données, plutôt que de déléguer cela entièrement à des librairies.
+
+Nous sommes conscients que pour obtenir un meilleur score, il aurait fallu investir davantage dans le pré-traitement des données, la sélection de features, et le réglage des hyperparamètres. Nous avons fait le choix inverse : explorer un maximum de modèles différents (régression linéaire, SARIMAX, GAM, XGBoost), même imparfaitement, jugeant que cette diversité d'expérience nous serait plus utile que d'optimiser un unique modèle. Ce rapport documente cette démarche, y compris les erreurs de pipeline et les résultats que nous avons rencontrés.
+
+
+#2. Feature Engineering
+
+Avant de complexifier nos modèles, nous avons mené un travail approfondi sur les variables explicatives afin de capturer la réalité physique et économique du réseau.
+
+##2.1 La Température et les Seuils Physiques
+
+La relation entre la température et la demande électrique ne semble pas linéaire et forme typiquement un "V".
+Afin de modéliser cet effet, nous avons créé des variables de degrés-jours de chauffage (Heating_Degrees). Contrairement à de simples indicateurs binaires comme Heating_Flag, qui permet d'activer une pente différente quand il fait froid, ces variables mesurent l'écart à une température de confort de référence (par exemple 15°C). Elles sont donc proportionnelles à l'énergie thermique requise par les radiateurs, permettant au modèle d'activer une pente de consommation plus précise lors des vagues de froid.
+
+Formellement, les variables de degrés-jours sont définies par :
+$$\text{Heating\_Degree}_t = \max(T_{\text{ref}} - T_t,\ 0)$$
+$$\text{Cooling\_Degree}_t = \max(T_t - T_{\text{ref}},\ 0)$$
+où $T_{\text{ref}} = 15^\circ$C est le seuil de confort typique utilisé dans la littérature. Ces deux termes encodent conjointement la forme en "V" de la relation température–demande : en dessous de $T_{\text{ref}}$, le chauffage augmente proportionnellement avec le froid ; en été, la climatisation crée une pente opposée.
+
+[ajouter le graphe de la relation en V entre la température et Net_demand, avec les deux régimes chauffage et refroidissement visibles]
+
+##2.2 La Rupture Structurelle du COVID-19
+
+Les données d'entraînement couvrent la période 2013–2022, qui inclut le confinement de mars 2020. L'idée était d'ajouter une variable binaire `Covid_Flag` pour signaler au modèle cette rupture structurelle : sans elle, le modèle risque d'apprendre une moyenne entre la période normale et la période confinée, produisant des prédictions systématiquement biaisées sur les deux fenêtres.
+
+Dans la pratique, ce flag a été créé sur les données d'entraînement mais n'a jamais été propagé correctement au jeu de test (voir section 3.1). Le jeu de test couvre la période de sobriété électrique de l'automne 2022, postérieure au confinement : toutes les observations test devraient avoir `Covid_Flag = 1`, mais le bug de pipeline leur a attribué `0`. L'intention était correcte ; l'implémentation ne l'a pas suivi.
+
+##2.3 Éviction de la Nébulosité
+
+Après analyse, la variable de nébulosité a été retirée de nos modèles finaux. Bien que la luminosité influe sur l'éclairage, son impact sur la demande nette globale reste marginal face aux effets écrasants de la température et de l'activité économique (son usage serait en revanche critique pour prévoir la seule production photovoltaïque).
+
+
+# 3. Modèles Linéaires et Optimisation "From Scratch"
+
+Pour débuter notre modélisation, nous avons implémenté nos propres algorithmes d'optimisation en Python (classe `LinearModel`), sans dépendre de librairies comme `scikit-learn`. 
+Ce choix n'est pas anodin : il nous a permis de contrôler précisément la fonction de perte minimisée, 
+ce que les API standard ne permettaient pas à notre connaissance pour la perte Pinball avec régularisation simultanée.
+
+## 3.1 Préparation des données pour la descente de gradient
+
+Unpoint crucial est que la descente de gradient est sensible à l'échelle des variables.
+Si une feature vaut ~300 (température en Kelvin par exemple) et une autre vaut 1 (flag binaire), leurs gradients sont de magnitudes très différentes,
+ce qui ralentit ou déstabilise la convergence.
+
+Nous avons donc normalisé uniquement les variables continues en les centrant et réduisant :
+$$\tilde{X}_j = \frac{X_j - \bar{X}_j}{s_j}$$
+Les variables binaires (jours de la semaine en one-hot, indicateurs de jours fériés) ont été laissées telles quelles.
+
+Les features effectivement utilisées par le modèle sont celles présentes **dans les deux fichiers** `train.csv` et `test.csv` :
+
+- **Température brute et ses agrégats spatiaux** : `Temp`, `Temp_s95`, `Temp_s99`, `Temp_s95_min`, `Temp_s95_max`, `Temp_s99_min`, `Temp_s99_max`
+- **Vent** : `Wind`, `Wind_weighted`
+- **Calendrier** : `toy` (time of year), `Year`, `Month`, `DLS`, `WeekDays` (one-hot, 6 colonnes)
+- **Jours particuliers** : `BH`, `BH_before`, `BH_after`, `BH_Holiday`, `Holiday`, `Holiday_zone_a/b/c`, `Summer_break`, `Christmas_break`
+- **Variables retardées (lags)** : `Load.1`, `Load.7`, `Net_demand.1`, `Net_demand.7`, `Solar_power.1`, `Solar_power.7`, `Wind_power.1`, `Wind_power.7`
+
+La nébulosité brute et pondérée est explicitement exclue (voir section 2.3).
+
+**Limite de pipeline (features non propagées au test) :** Lors de la préparation des données, trois features avaient été construites sur les données d'entraînement mais n'ont pas été recréées pour le jeu de test :
+- `Covid_Flag` = $\mathbb{1}[\text{Date} \geq \text{17 mars 2020}]$
+
+L'instruction `X_test.reindex(columns=X_train.columns, fill_value=0.0)` les a remplies silencieusement avec zéro pour toutes les observations de test. 
+Ces features ont donc été apprises par le modèle mais sont restées constamment nulles lors des prédictions finales, ce qui revient à les ignorer complètement. Le modèle s'est ainsi appuyé uniquement sur la température brute pour l'effet thermique, sans la transformation en degrés-jours souhaitée.
+
+## 3.2 Régression Linéaire (minimisation du RMSE) comme baseline
+
+Le modèle linéaire s'écrit :
+$$\hat{y} = X\beta + b$$
+avec $X \in \mathbb{R}^{n \times p}$ la matrice de features, $\beta \in \mathbb{R}^p$ les poids et $b$ le biais.
+
+En minimisant le RMSE (qui revient à minimiser le MSE), on cherche :
+$$\hat{\beta} = \arg\min_{\beta} \frac{1}{n} \sum_{i=1}^{n} (y_i - \hat{y}_i)^2$$
+
+La mise à jour par descente de gradient à l'itération $t$ est :
+$$\beta^{(t+1)} = \beta^{(t)} - \alpha \cdot \nabla_\beta \mathcal{L}$$
+avec le gradient :
+$$\nabla_\beta \mathcal{L}_{\text{RMSE}} = \frac{2}{n} X^\top (X\beta - y)$$
+
+Nous avons utilisé `learning_rate = 0.02` et `maxIter = 10000`. Ce modèle converge proprement et nous a permis de valider que le pipeline de données fonctionnait.
+
+**Limite fondamentale :** Ce modèle estime $\mathbb{E}[Y \mid X]$, c'est-à-dire la demande *moyenne* conditionnelle. Or notre métrique d'évaluation est la **Pinball Loss au quantile 80%**, et non la moyenne. Utiliser ce modèle directement pour la soumission constitue donc un biais méthodologique.
+
+## 3.3 Régression Quantile par descente de gradient (Pinball Loss)
+
+Pour corriger ce biais, nous avons adapté la descente de gradient pour minimiser directement la **Pinball Loss** (aussi appelée *Quantile Loss*) au quantile $\tau = 0.80$ :
+
+$$\mathcal{L}_{\tau}(y, \hat{y}) = \frac{1}{n}\sum_{i=1}^{n} \rho_\tau(y_i - \hat{y}_i)$$
+
+où la fonction "check" $\rho_\tau$ est définie par :
+
+$$\rho_\tau(r) = \begin{cases} \tau \cdot r & \text{si } r \geq 0 \\ (\tau - 1) \cdot r & \text{si } r < 0 \end{cases}$$
+
+Cette fonction est asymétrique. En effet, elle pénalise **4 fois plus** une sous-estimation qu'une surestimation ($\tau = 0.8$ implique un ratio $0.8 / 0.2 = 4$). Le modèle est donc naturellement poussé à prédire des valeurs hautes, ciblant les pics de consommation.
+
+La Pinball Loss n'est pas différentiable en zéro. Le gradient par rapport aux poids s'écrit néanmoins presque partout :
+
+$$\nabla_\beta \mathcal{L}_{\tau} = \frac{1}{n} X^\top \cdot \mathbf{g}$$
+
+où $\mathbf{g}_i = \mathbb{1}[\hat{y}_i > y_i] - \tau$, ce qui donne :
+- $g_i = 1 - \tau = 0.2$ si $\hat{y}_i > y_i$ (surestimation, pénalité faible)
+- $g_i = -\tau = -0.8$ si $\hat{y}_i \leq y_i$ (sous-estimation, pénalité forte)
+
+Nous avons utilisé `learning_rate = 0.02` et `maxIter = 17000` (plus d'itérations car la Pinball Loss est plus difficile à descendre que le RMSE). Un critère de convergence précoce s'arrête si l'objectif passe sous $10^{-6}$.
+
+**Vérification empirique de la calibration :** À la fin de l'entraînement, on vérifie que $P(\hat{y} \geq y) \approx \tau = 0.80$. Si cette couverture est trop éloignée de 80%, c'est un signal que la descente n'a pas convergé ou que le learning rate est inadapté.
+
+**Résultat obtenu et bug constaté :** En pratique, les prédictions finales de ce modèle sont de l'ordre de **470 MW**, là où la demande réelle est autour de **39 000 MW**. Ce résultat est clairement absurde et ne peut pas s'expliquer uniquement par le bug de pipeline décrit en 3.1.
+
+La cause probable est un problème de normalisation asymétrique : les features de `X_test` ont été normalisées avec les statistiques calculées sur `X_train` (moyennes et écarts-types de l'entraînement), mais certaines colonnes présentes en train et absentes en test (comme les degrés-jours) sont remplies avec `fill_value=0.0` **avant** la normalisation, ce qui correspond à une valeur hors distribution. Le modèle, dont les poids ont été appris sur des features normalisées dans un certain intervalle, reçoit des entrées dans un espace différent et produit des prédictions hors échelle.
+
+Nous comprenons bien ce que ce modèle est censé faire : si le pipeline était correct, la descente de gradient devrait converger vers des poids $\beta$ tels que, pour chaque observation, $\hat{y}_i$ dépasse la vraie valeur $y_i$ dans environ 80% des cas. Le modèle apprendrait à se décaler vers le haut par rapport à la moyenne, ciblant les pics de consommation plutôt que le niveau moyen. Ce principe est valide, c'est l'implémentation du pipeline qui n'a pas fonctionné comme prévu.
+
+## 3.3.1 Validation croisée
+
+strategie d entrainement de nos modeles de regression lineaire et quantile:  Validation croisee par blocs, tenant compte de la temporalité des données. On a hésité entre ce dernier et validation croisee par blocs qui initiaient tous au debut de la periode. Mais compte tenu de la tendance à la baisse de la consommation liée à la sobriété énergétique, ce dernier aurai pris en compte dans chaque blocs des valeurs trop hautes du debut de la periode biaisant les valeurs moyenne de validation croisee vers le haut.
+
+Pour évaluer de manière robuste nos modèles de régression (linéaire et quantile) sans introduire de fuite de données, nous avons mis en place une stratégie de validation croisée temporelle par blocs (Time Series Cross-Validation).
+
+Lors de la conception de cette stratégie, deux approches ont été envisagées pour la constitution des ensembles d'entraînement :
+
+- La fenêtre extensive (Expanding Window) où chaque nouveau pli d'entraînement démarre systématiquement au début de l'historique des données et s'agrandit au fil du temps.
+
+- La fenêtre glissante (Rolling Window) où l'ensemble d'entraînement a une taille fixe et le bloc se décale chronologiquement pour chaque pli.
+
+Nous avons finalement opté pour l'approche par fenêtre glissante. En effet, la série temporelle étudiée présente une tendance structurelle à la baisse, liée notamment aux récents efforts de sobriété énergétique. Si nous avions utilisé une fenêtre extensive, le modèle aurait été contraint de s'entraîner itérativement sur les données du début de la période d'étude, caractérisées par des niveaux de demande électrique nettement plus élevés. Cette inertie aurait introduit un biais de surestimation, tirant artificiellement les moyennes de notre validation croisée vers le haut. La validation croisée par fenêtre glissante permet de ne prendre en compte cette "mémoire" lointaine qu'une fois et garantit que le modèle s'adapte à la dynamique récente et pertinente du réseau de consommation.
+
+## 3.4 Régularisation L1 et L2
+
+Pour éviter le surapprentissage et réduire l'influence des features peu informatives, nous avons ajouté un terme de pénalité sur les poids.
+
+**Ridge (L2) :** on pénalise la norme euclidienne des poids :
+$$\mathcal{L}_{\text{Ridge}} = \mathcal{L}_{\tau} + \lambda \sum_{j=1}^{p} \beta_j^2$$
+Le gradient de la pénalité est $2\lambda\beta$, ce qui pousse progressivement tous les poids vers zéro mais ne les annule jamais complètement.
+
+**Lasso (L1) :** on pénalise la norme $L_1$ des poids :
+$$\mathcal{L}_{\text{Lasso}} = \mathcal{L}_{\tau} + \lambda \sum_{j=1}^{p} |\beta_j|$$
+Le gradient de la pénalité est $\lambda \cdot \text{sign}(\beta)$. Cette pénalité peut annuler complètement des coefficients, produisant une sélection automatique de variables. Elle est statistiquement équivalente à poser une prior de Laplace sur $\beta$.
+
+Le biais $b$ n'est pas régularisé (ni en L1 ni en L2), conformément à la pratique standard.
+
+Nous avons conduit un sweep de valeurs de $\lambda$ allant de $0$ à $10$ sur un split temporel train/validation (80/20), en mesurant la Pinball Loss de validation, la couverture $P(\hat{y} \geq y)$ et la norme $\|\beta\|_2$. Les résultats sont sauvegardés dans `regularization_experiments_summary.csv`.
+
+[ajouter la courbe de la Pinball Loss de validation en fonction de $\lambda$ pour les régularisations L1 et L2, montrant le plateau optimal dans la zone $[10^{-4},\ 10^{-2}]$]
+
+**Ce que nous avons observé :** Les $\lambda$ très élevés ($\lambda \geq 1$) dégradent la performance, car ils forcent tous les poids vers zéro, perdant ainsi l'information des features. Les $\lambda$ très faibles ($\lambda \leq 10^{-6}$) sont pratiquement équivalents à aucune régularisation. La zone utile se situe entre $10^{-4}$ et $10^{-2}$, avec des gains modestes sur le jeu de validation. Ce résultat indique que la régularisation n'est pas le levier principal ici : le vrai problème est la non-linéarité de la relation température–demande, que le modèle linéaire ne peut pas capturer seul.
+
+## 3.5 Importance des variables (analyse des coefficients)
+
+Une propriété utile du modèle linéaire est que les coefficients $\beta_j$ sont directement interprétables **après normalisation** : leur valeur absolue mesure l'impact marginal de chaque variable sur la prévision.
+
+Nous avons bien implémenté ce classement dans le notebook (tri par $|\beta_j|$ décroissant). Cependant, étant donné que le modèle Pinball produit des prédictions de l'ordre de 470 MW (section 3.3), les poids appris sont le résultat d'une descente de gradient sur un espace de features incohérent. 
+Il n'est donc pas raisonnable d'interpréter ces coefficients comme des mesures d'importance réelle des variables.
+
+## 3.6 Bilan du modèle linéaire
+
+Le modèle linéaire remplit son rôle de **baseline interprétable** :
+
+- Le score de soummission est de 540
+- La régularisation apporte un gain marginal sur le jeu de validation, ce qui suggère que le problème principal n'est pas le surapprentissage mais bien la capacité expressive du modèle.
+
+**Ses limites sont claires.** D'abord, le bug de pipeline identifié en 3.1 : les degrés-jours et le flag COVID n'étaient pas propagés au test, privant le modèle de transformations qu'il avait apprises. 
+Ensuite, même sans ce bug, un modèle linéaire ne peut pas représenter la relation en "V" entre température et demande sans aide explicite. La saisonnalité hebdomadaire est capturée via les dummies, mais les interactions (par exemple : jour froid un weekend) ne sont pas modélisables sans termes d'interaction explicites. Ces limitations ont motivé notre passage aux modèles non-linéaires (GAM).
+
+# 4. ARIMA, SARIMA et SARIMAX
+
+## 4.1 Principe général des modèles ARIMA
+
+Un modèle **ARIMA(p, d, q)** décompose une série temporelle en trois composantes :
+
+- **AR(p)** (AutoRégressif) : la valeur actuelle dépend linéairement des $p$ valeurs passées :
+$$Y_t = \phi_1 Y_{t-1} + \phi_2 Y_{t-2} + \dots + \phi_p Y_{t-p} + \epsilon_t$$
+
+- **I(d)** (Intégré) : la série est différenciée $d$ fois pour la rendre stationnaire. Une série est stationnaire si sa moyenne et sa variance ne dépendent pas du temps.
+
+- **MA(q)** (Moyenne Mobile) : la valeur actuelle dépend des $q$ erreurs passées :
+$$Y_t = \epsilon_t + \theta_1 \epsilon_{t-1} + \dots + \theta_q \epsilon_{t-q}$$
+
+Le modèle ARIMA combine ces trois termes. Pour identifier les bons ordres $p$, $d$, $q$, on utilise classiquement :
+- Le **test ADF** (Augmented Dickey-Fuller) pour tester la stationnarité et choisir $d$
+- Les graphes **ACF** (AutoCorrelation Function) et **PACF** (Partial ACF) pour guider $q$ et $p$
+- Le critère **AIC** pour comparer les modèles en pénalisant la complexité :
+$$\text{AIC} = -2\ln(\hat{L}) + 2k$$
+où $\hat{L}$ est la vraisemblance maximisée du modèle et $k$ le nombre de paramètres libres.
+
+La règle de lecture classique des graphes ACF/PACF est la suivante : si le PACF coupe net après le lag $p$ et que l'ACF décroît exponentiellement, cela suggère un processus AR($p$) ; si l'ACF coupe net après le lag $q$ et le PACF décroît, cela suggère un MA($q$). Des pics significatifs aux multiples de $s$ dans les deux graphes indiquent une saisonnalité à la période $s$.
+
+[ajouter les graphes ACF et PACF de la série Net_demand brute, avec les pics aux lags 7, 14, 21 bien visibles]
+
+ARIMA a une limite fondamentale : il ne modélise pas la saisonnalité. Or la demande électrique a une saisonnalité hebdomadaire très marquée (le lundi ressemble au lundi de la semaine précédente, pas au dimanche).
+
+## 4.2 SARIMA : ajout de la saisonnalité
+
+**SARIMA(p, d, q)(P, D, Q, s)** étend ARIMA avec des termes saisonniers de période $s$ :
+
+$$\Phi_P(B^s)\phi_p(B)(1-B^s)^D(1-B)^d Y_t = \Theta_Q(B^s)\theta_q(B)\epsilon_t$$
+
+où $B$ est l'opérateur retard ($B Y_t = Y_{t-1}$) et $s$ est la période saisonnière. 
+Dans notre contexte, $s = 7$ (saisonnalité hebdomadaire sur des données journalières). 
+Les paramètres $(P, D, Q)$ jouent le même rôle que $(p, d, q)$ mais sur les lags saisonniers : le terme AR saisonnier relie $Y_t$ à $Y_{t-7}$, $Y_{t-14}$, etc.
+
+## 4.3 SARIMAX : ajout de variables exogènes
+
+**SARIMAX** ajoute un vecteur de variables exogènes $X_t$ au modèle SARIMA :
+
+$$Y_t = X_t \beta + \text{Sarima}(\text{résidus})$$
+
+Le modèle estime d'abord la contribution des variables externes (température, calendrier, lags de demande), puis modélise la structure temporelle du résidu restant. 
+C'est l'approche hybride que nous avons explorée : utiliser `Net_demand.1` (la vraie valeur du jour précédent) comme variable exogène donne au modèle une information fraîche à chaque pas de prédiction.
+
+---
+
+## 4.4 Ce que nous avons fait : étape par étape
+
+### Étape 1 — Analyse de stationnarité
+
+Avant de choisir les paramètres, nous avons analysé la série `Net_demand` :
+
+- **Test ADF** sur la série brute et sur la série différenciée au premier ordre
+- **Graphes de moyenne et écart-type glissants** (fenêtre 7 jours) pour inspecter visuellement la stationnarité
+- **ACF et PACF** sur la série brute et différenciée, en cherchant des pics aux lags 7, 14, 21 (signature d'une saisonnalité hebdomadaire)
+- **Décomposition saisonnière additive** sur la série journalière avec période 52 (≈ 365/7)
+
+La saisonnalité hebdomadaire était clairement visible dans les graphes ACF, avec des pics significatifs aux multiples de 7.
+
+[ajouter la décomposition saisonnière additive de Net_demand : tendance, composante saisonnière hebdomadaire et résidu]
+
+### Étape 2 — ARIMA baseline (score ~1200)
+
+Nous avons fait un **grid search** sur les ordres $(p, q) \in \{0,\dots,4\} \times \{0,\dots,3\}$ avec $d = 0$ (la série étant appliquée sur la série déjà différenciée manuellement), en sélectionnant le meilleur modèle par **AIC**.
+
+Le meilleur ARIMA trouvé a ensuite été soumis et a obtenu un **score Pinball d'environ 1200**, ce qui était décevant. Le diagnostic résiduel expliquait pourquoi : le **test de Ljung-Box** aux lags 7, 14 et 21 rejetait l'hypothèse d'indépendance des résidus ($p < 0.05$), et l'ACF des résidus montrait des pics significatifs aux multiples de 7. ARIMA n'avait pas capturé la saisonnalité hebdomadaire, dont la structure restait entièrement dans les résidus.
+
+La statistique de Ljung-Box est définie par :
+$$Q(h) = n(n+2)\sum_{k=1}^{h} \frac{\hat{\rho}_k^2}{n-k}$$
+où $\hat{\rho}_k$ est l'autocorrélation empirique des résidus au lag $k$ et $n$ la taille de l'échantillon. Sous $H_0$ d'absence d'autocorrélation résiduelle, $Q(h) \sim \chi^2(h)$. Rejeter $H_0$ au lag $h = 7$ indique que la saisonnalité hebdomadaire n'a pas été absorbée par le modèle.
+
+[ajouter le graphe de l'ACF des résidus du meilleur ARIMA, montrant les pics résiduels aux lags 7, 14, 21]
+
+### Étape 3 — SARIMA naïf (prédiction sur toute la période de test)
+
+Nous avons ajouté les termes saisonniers avec $s = 7$, en faisant un nouveau grid search sur $(P, D, Q) \in \{0,1\} \times \{0,1\} \times \{0,1\}$.
+
+La première approche consistait à **prédire toute la période de test d'un seul coup** (multi-step forecast). Les résultats montraient un phénomène bien connu : les premières prédictions (jours 1 à 3-4) étaient relativement cohérentes avec la réalité, mais après 4-5 jours, les prédictions **convergaient progressivement vers la moyenne de la série**.
+
+Ce comportement n'est pas un bug — c'est une propriété mathématique fondamentale des processus ARIMA. Pour un horizon $h$ tendant vers l'infini, la prévision conditionnelle d'un processus ARIMA stationnaire converge vers la moyenne inconditionnelle de la série :
+$$\lim_{h \to \infty} \mathbb{E}[Y_{t+h} \mid Y_t, Y_{t-1}, \dots] = \mu$$
+
+En pratique, cette convergence est rapide : dès que l'horizon dépasse la portée des termes AR et saisonniers, le modèle "oublie" l'état actuel et revient à sa valeur d'équilibre. Sur une demande électrique avec saisonnalité hebdomadaire, cela se traduit par des prédictions plates après quelques jours.
+
+[ajouter le graphe des prédictions SARIMA naïf (multi-step depuis un seul point de départ) vs valeurs réelles, montrant la convergence progressive vers la moyenne à partir du 4e–5e jour]
+
+### Étape 4 — SARIMAX avec prédiction journalière glissante (score ~650)
+
+Pour contourner ce problème, nous avons adopté une **stratégie de prédiction glissante (rolling forecast)** : plutôt que de prédire toute la période d'un coup, on prédit **un jour à la fois**, puis on met à jour l'état interne du modèle avec la vraie valeur observée avant de prédire le jour suivant.
+
+La clé est la variable `Load.1` (la vraie charge du jour précédent), disponible dans `test.csv`. À chaque pas $i$ :
+
+1. On prédit $\hat{Y}_{t_i}$ avec le modèle courant
+2. On récupère la vraie valeur $Y_{t_{i-1}}$ depuis `Load.1`
+3. On met à jour l'état interne du modèle via `.append(new_obs, refit=False)` de statsmodels — ce qui propage la vraie observation sans refaire un entraînement complet
+
+Techniquement, `.append(refit=False)` effectue une mise à jour du filtre de Kalman sous-jacent au modèle SARIMAX (statsmodels utilise une représentation espace-état). 
+Le modèle révise sa distribution a posteriori sur l'état caché à partir de la nouvelle observation, sans modifier les paramètres $\phi, \theta, \Phi, \Theta$ déjà estimés sur les données d'entraînement.
+
+Formellement, pour un modèle en représentation espace-état $Y_t = \mathbf{Z}\boldsymbol{\alpha}_t + \epsilon_t$, les équations de mise à jour du filtre de Kalman à la réception d'une nouvelle observation $y_t^*$ sont :
+$$\boldsymbol{\alpha}_{t|t} = \boldsymbol{\alpha}_{t|t-1} + \mathbf{P}_{t|t-1}\mathbf{Z}^\top F_t^{-1}\, v_t$$
+$$\mathbf{P}_{t|t} = \mathbf{P}_{t|t-1} - \mathbf{P}_{t|t-1}\mathbf{Z}^\top F_t^{-1}\mathbf{Z}\mathbf{P}_{t|t-1}$$
+où $v_t = y_t^* - \mathbf{Z}\boldsymbol{\alpha}_{t|t-1}$ est l'innovation (écart entre la réalité et la prédiction a priori), et $F_t = \mathbf{Z}\mathbf{P}_{t|t-1}\mathbf{Z}^\top + H$ est la variance de cette innovation. Les paramètres du modèle restent fixes ; seule la distribution de l'état interne $\boldsymbol{\alpha}_t$ est révisée.
+
+Ce mécanisme donne au modèle un **ancrage local** à chaque nouvelle journée. Il ne prédit plus à 30 jours d'intervalle depuis un état figé, mais à 1 jour depuis un état mis à jour. Le résultat a été spectaculaire : **le score est passé de ~1200 à ~650**, uniquement grâce à ce changement de stratégie de prédiction, sans changer le modèle lui-même.
+
+[ajouter le graphe des prédictions SARIMAX rolling vs valeurs réelles de Net_demand sur la période de test (valeurs autour de 40 000–45 000 MW)]
+
+Nous avons également testé plusieurs combinaisons de paramètres saisonniers $(P, D, Q)$ avec cette stratégie glissante pour affiner davantage le score.
+
+### Bilan de l'approche SARIMA/SARIMAX
+
+SARIMA nous a appris deux choses importantes. D'abord, qu'un modèle de séries temporelles sans saisonnalité explicite est insuffisant pour la demande électrique : les résidus d'ARIMA contenaient encore toute la structure hebdomadaire, ce que le test de Ljung-Box a clairement confirmé.
+Ensuite, que la **stratégie de prédiction** (naïve vs glissante) peut avoir autant d'impact sur le score que le choix du modèle lui-même — passer de multi-step à rolling a divisé le score par presque deux.
+
+La limite principale de SARIMAX reste sa nature **univariée** (ou faiblement multivariée) : il modélise la dynamique temporelle de la série, mais ne capte pas les effets non linéaires de la température ou du calendrier aussi bien qu'un modèle de machine learning dédié. C'est ce qui a motivé notre passage vers les GAM.
+
+## 4.5 Décomposition de la prédiction : Load, Solar et Wind séparément
+
+### L'idée et son origine
+
+La demande nette est définie par :
+$$\text{Net\_demand} = \text{Load} - \text{Solar\_power} - \text{Wind\_power}$$
+
+Plutôt que de prédire `Net_demand` directement, on peut prédire séparément chacun des trois termes, puis les combiner. Cette idée nous avait été soufflée en observant l'approche d'un autre groupe (MAP&IA) qui avait utilisé trois GAM distincts pour les trois composantes.
+
+Nous y avions pensé dès le début, mais nous l'avions mise de côté sur la régression linéaire pour une raison précise : additionner trois modèles, c'est additionner trois sources d'erreur. Si chaque modèle a une erreur résiduelle $\epsilon_i$, l'erreur finale sur `Net_demand` est $\epsilon_{\text{Load}} + \epsilon_{\text{Solar}} + \epsilon_{\text{Wind}}$, ce qui peut être pire qu'une seule erreur directe selon la covariance entre ces erreurs. Nous avions donc jugé que pour un modèle linéaire simple, la prédiction directe de `Net_demand` était plus sûre.
+
+Nous avons repris cette idée dans le cadre SARIMAX, où la décomposition prend plus de sens : chacune des trois séries a une **dynamique temporelle propre**, et un modèle unique sur `Net_demand` mélange des processus de natures très différentes.
+
+### SARIMAX sur Load (résultat satisfaisant)
+
+`Load` est la consommation brute d'électricité. Elle suit des patterns saisonniers très réguliers (journalier, hebdomadaire, annuel), ce qui la rend bien adaptée à un modèle SARIMAX avec rolling forecast. Les prédictions obtenues sur le jeu de test (`Load_forecast` dans `sarimax_rolling_forecasts.csv`) donnent des valeurs autour de 40 000–45 000 MW, cohérentes avec les ordres de grandeur attendus.
+
+### SARIMAX sur Solar power (résultat acceptable)
+
+`Solar_power` est plus complexe : la production photovoltaïque varie fortement selon la saison, l'heure de la journée et la nébulosité. Nous avons testé un SARIMAX légèrement plus élaboré sur cette série, en tenant compte de la saisonnalité journalière. Les prédictions (`sarimax_solar_rolling_forecasts_q06.csv`) sont dans l'ordre de grandeur attendu (~2 000–3 000 MW), même si la qualité de l'ajustement est moins bonne que pour `Load`.
+
+### Wind power : une série difficile à modéliser
+
+`Wind_power` est le terme le plus problématique des trois. Contrairement à `Load` ou `Solar_power`, la production éolienne ne suit pas de pattern temporel facilement exploitable. Elle dépend de la météo locale à court terme — direction, vitesse, variabilité du vent — ce qui en fait en grande partie une série **aléatoire à l'échelle de quelques jours**.
+
+Nous avons cherché des approches dans la littérature, et il ressort que les modèles dits **"boîte noire"** — réseaux de neurones récurrents (LSTM), forêts aléatoires, gradient boosting — obtiennent généralement de meilleurs résultats sur la prédiction éolienne que les modèles statistiques classiques. La raison est que ces modèles peuvent capturer des interactions complexes entre variables exogènes (température, vent spatialisé, saison) sans hypothèse de structure.
+
+Nous avons finalement modélisé `Wind_power` avec **XGBoost**, ce qui a produit des prédictions numériquement raisonnables visuellement raisonnables (`xgboost_wind_forecasts.csv`). Cependant, nous avons remarqué que le processus de choix des hyperparamètres (profondeur des arbres, taux d'apprentissage, nombre d'estimateurs) était difficile à justifier : on peut faire varier ces paramètres et observer l'effet sur la validation, mais il est compliqué de donner une intuition statistique claire sur *pourquoi* telle valeur est meilleure qu'une autre, contrairement à $\lambda$ dans Ridge ou à $s$ dans SARIMA.
+
+### Pourquoi nous n'avons pas poussé plus loin les modèles boîte noire
+
+Ce constat sur XGBoost rejoint la philosophie générale de notre projet : nous voulions comprendre les mécanismes des modèles, pas seulement en observer les sorties. 
+Les modèles de deep learning appliqués aux séries temporelles (LSTM, Transformer, etc.) peuvent certainement mieux performer sur `Wind_power`, mais leur interprétation est difficile, en tout cas à notre échelle, et les implémenter correctement en deux semaines sans copier du code existant aurait été une tâche à part entière. 
+Nous avons donc fait le choix de ne pas aller dans cette direction, en considérant que reproduire un modèle sans en comprendre le fonctionnement serait contraire à notre objectif.
+
+# 5 Les Modèles Additifs Généralisés (GAM)
+
+Pour capturer les effets fortement non-linéaires de la météo (sans avoir à créer manuellement des dizaines de variables d'interaction), nous avons implémenté un **Modèle Additif Généralisé (GAM)**.
+
+Un GAM s'écrit sous la forme :
+$$Y = \beta_0 + \sum_{j=1}^{p} f_j(X_j) + \epsilon$$
+où chaque $f_j$ est une **spline**, qui est une fonction lisse estimée à partir des données en minimisant un critère des moindres carrés pénalisé :
+$$\sum_{i=1}^{n} \left(y_i - \hat{y}_i\right)^2 + \lambda_j \int \left[f_j''(x)\right]^2 dx$$
+La pénalité $\int [f_j''(x)]^2 dx$ mesure la courbure de la spline. Le paramètre $\lambda_j$ contrôle le compromis biais-variance. Dès lors, un $\lambda_j \to 0$ laisse la courbe zigzaguer pour passer par tous les points et revient à interpoler les données (surapprentissage) tandis qu'un $\lambda_j \to \infty$ force la spline à être une droite au risque de passer à côté de la vraie tendance (sous-apprentissage).
+
+Les $\lambda_j$ sont estimés automatiquement par **REML** (Restricted Maximum Likelihood), qui traite les coefficients des splines comme des effets aléatoires. La log-vraisemblance REML à maximiser est proportionnelle à :
+$$\ell_{\text{REML}}(\boldsymbol{\lambda}) \propto -\frac{1}{2}\log\left|\mathbf{X}^\top\mathbf{X} + \mathbf{S}_{\boldsymbol{\lambda}}\right| - \frac{n - p}{2}\log\hat{\sigma}^2$$
+où $\mathbf{S}_{\boldsymbol{\lambda}} = \sum_j \lambda_j \mathbf{S}_j$ est la matrice de pénalité globale (chaque $\mathbf{S}_j$ code la pénalité de la deuxième dérivée de $f_j$). REML est préférée au maximum de vraisemeblance classique car elle corrige un biais d'estimation des composantes de variance, c'est l'analogue statistique de diviser par $n-1$ plutôt que $n$ dans la variance empirique.
+
+## 5.1 Quatre spécifications GAM comparées
+
+Nous avons implémenté quatre modèles GAM en R avec le package `mgcv`, tous estimés par REML.
+
+**GAM 6 — modèle de base :**
+```r
+gam(Net_demand ~ s(Time, k=3, bs='cr') + s(toy, k=30, bs='cc') +
+    s(Temp, k=10) + s(Net_demand.1) + s(Net_demand.7) +
+    s(Temp_s99) + as.factor(WeekDays) + BH +
+    s(Wind) + te(Time, Nebulosity, k=c(4,10)))
+```
+Le terme `s(toy, bs='cc')` utilise une spline **cyclique** pour la saisonnalité annuelle (`toy` = time of year, valeur entre 0 et 1). Cela force la courbe à être continue entre le 31 décembre et le 1er janvier. Les lags `Net_demand.1` et `Net_demand.7` sont inclus pour capturer l'autocorrélation temporelle sans avoir à modéliser explicitement un processus ARIMA. Le terme `te(Time, Nebulosity)` est un **produit tensoriel** permettant à l'effet de la nébulosité d'être mêlé à celui du temps, notamment pour espérer capturer que la mesure de la nébulosité n'est pas la même avant 2018 et après.
+
+**GAM 7 — saisonnalité évolutive :**
+```r
+gam(Net_demand ~ te(Time, toy, k=c(4,20), bs=c('cr','cc')) + ...)
+```
+Ici, l'interaction `te(Time, toy)` permet à la forme de la courbe saisonnière de **changer d'une année à l'autre** , ce qui est pertinent pour capturer la tendance à la baisse de la consommation liée à la sobriété énergétique.
+
+**GAM 8 — interaction température-vent :**
+```r
+gam(Net_demand ~ s(Time, k=3) + s(toy, k=30, bs='cc') +
+    te(Temp, Wind, k=c(8,8)) + ...)
+```
+L'intuition ici est que l'effet du vent sur la consommation **dépend de la température** . Par grand froid, le vent accentue la sensation de froid, augmentant le recours au chauffage. Le tenseur `te(Temp, Wind)` capture cette interaction sans supposer qu'elle est additive.
+
+**GAM 9 — sélection automatique de variables :**
+```r
+gam(Net_demand ~ s(Time, bs='cs') + s(toy, bs='cc') + ..., select=TRUE)
+```
+Le paramètre `select=TRUE` et les splines de type `bs='cs'` (cubic shrinkage) ajoutent une pénalité supplémentaire qui peut **annuler complètement** une spline si la variable est non-informative. C'est l'équivalent d'un Lasso pour les GAM et le modèle peut décider lui-même de retirer une variable en mettant son effet à zéro.
+
+Les quatre modèles ont été comparés par **AIC** et par la **déviance expliquée** ($R^2$ de déviance). Ces métriques mesurent la qualité d'ajustement (déviance expliquée) en pénalisant la complexité (AIC). Un modèle avec un AIC plus faible est préféré, d'autant plus que le score provisoire n'e représente que'est calculé que sur 30% du private set.
+
+Un outil de diagnostic complémentaire est la vérification des **degrés de liberté effectifs** (edf) de chaque spline. Si `edf ≈ k` (la dimension de la base choisie), la spline est "saturée". Le signal dans les données nécessite plus de flexibilité (plus de fonctions de base) que ce que la base actuelle permet, et il faudrait augmenter `k`. Si `edf << k`, la pénalité REML a fortement lissé la spline et le choix de `k` n'est pas limitant. Dans ce cas, le `k` convient.
+
+Sur la base de cette comparaison, **GAM 8** a été retenu comme meilleur modèle et ses prédictions ont été soumises.
+
+Effets partiels estimés de GAM 8 : s(toy), s(Temp), te(Temp, Wind)  et non-linéarités capturées par les splines :
+Voici les effets partiels estimés pour évaluer les non-linéarités :
+
+```{r effets-partiels, echo=FALSE, fig.cap="Effets partiels estimés de GAM 8", fig.width=8, fig.height=4}
+train$Time <- as.numeric(train$Date)
+test$Time  <- as.numeric(test$Date)
+
+gam8 <- gam(Net_demand ~ s(Time, k=3) + s(toy, k=30, bs='cc') + 
+              te(Temp, Wind, k=c(8, 8)) + 
+              s(Net_demand.1) + s(Net_demand.7) +
+              s(Temp_s99) + as.factor(WeekDays) + BH +
+              s(Nebulosity), 
+            data=train, method="REML")
+plot(gam8, pages = 1, scheme = 2) 
+```
+
+Cependant, l'utilisation de la fonction standard `gam()` repose sur des **hypothèses statistiques fortes** :
+```{r effets-partiels, echo=FALSE, fig.cap="Effets partiels estimés de GAM 8", fig.width=8, fig.height=4}
+gam.check(gam8)
+```
+1. **Erreurs gaussiennes et homoscédastiques** : $\epsilon \sim \mathcal{N}(0, \sigma^2)$. Le modèle optimise la log-vraisemblance gaussienne, ce qui revient à minimiser le MSE. Il prédit donc la moyenne, pas le quantile 80.
+2. **Indépendance des résidus** : en séries temporelles, les résidus consécutifs sont corrélés. L'inclusion des lags `Net_demand.1` et `Net_demand.7` comme variables explicatives atténue ce problème sans le résoudre complètement.
+3. **Additivité** : les effets de chaque variable s'additionnent, sauf là où un tenseur `te()` a été explicitement utilisé pour modéliser une interaction.
+Ainsi, si le nuage des résidus ne présente aucun motif particulier, n'invalidant pas l'homosédasticité, (fig.2) et que l'histogramme des résidus semble bien être une cloche symétrique centrée en 0, n'invalidant pas la normalité des résidus (fig.3), les quantiles empiriques ne s'alignent pas aux quantiles théoriques, notamment pour les valeurs extrêmes. Plus dramatique, certains sont même au dessus de la diagonale, suggérant qu'on a sous-estimé les valeurs réelles et préfigurant une forte pénalité ! C'est pourquoi on a été amené à réfléchir à un autre modèle GAM qui s'ajuste sur la pinball loss et qui n'a pas d'hypothèses aussi contraignantes sur la distributuion des résidus que le GAM classique.
+
+## 5.2 GAM en Python avec pyGAM (ExpectileGAM)
+
+En parallèle des GAM R, nous avons aussi testé une implémentation Python avec la librairie `pyGAM`. Le modèle utilisé est `ExpectileGAM` avec `expectile=0.8`, qui est une approximation de la régression quantile au sens des expectiles.
+
+Un **expectile** au niveau $\tau$ est défini comme la solution de :
+$$\hat{\mu}_\tau = \arg\min_{\mu} \sum_{i=1}^{n} w_\tau(y_i - \mu)^2$$
+avec $w_\tau = \tau$ si $y_i > \mu$ et $w_\tau = 1 - \tau$ sinon. Pour $\tau = 0.5$ on retrouve la moyenne. Pour $\tau = 0.8$ on obtient une valeur qui se comporte comme un quantile haut, mais l'expectile n'est pas exactement le quantile — la correspondance exacte dépend de la distribution des résidus.
+
+Le modèle Python appliquait une spline `s(j)` à chaque feature $j$, avec la même normalisation et le même pipeline que pour la régression linéaire. Un split temporel 80/20 a permis de comparer directement la Pinball Loss de validation de `ExpectileGAM` avec celle du modèle linéaire.
+
+## 5.3 Résultat contre-intuitif : le GAM moyen bat le GAM quantile
+
+Contre toute attente, le **GAM classique R (prédisant la moyenne conditionnelle)** a obtenu un meilleur score Pinball 80 sur le jeu de test que le modèle `qgam` (ajusté directement sur la Pinball Loss). Plusieurs raisons peuvent expliquer cela :
+
+1. **Instabilité aux extrêmes** : La régression quantile à $\tau = 0.80$ n'utilise que les observations proches du 80ème centile pour calibrer les splines. Avec peu de points dans cette zone, l'estimation est plus bruyante et peut sur-apprendre les fluctuations de l'ensemble d'entraînement.
+2. **Distribution des erreurs proche de la symétrie** : Si les résidus du GAM moyen sont approximativement symétriques autour de zéro et de variance constante, la prédiction de la moyenne reste un estimateur très robuste, en exploitant toutes les observations, pas seulement 20% d'entre elles.
+3. **Maturité du lissage REML** : Les outils de régularisation dans `mgcv` sont très stables. L'outil `qgam` est plus récent et potentiellement moins bien calibré sur ce type de données.
+
+Face à ce résultat empirique, nous avons retenu **GAM 8** (modèle moyen R) comme notre meilleur modèle GAM, avec un score de **480**.
+
+---
+
+# 6 Comparaison des Modèles
+
+Afin de visualiser l'apport de chaque itération (de la descente de gradient pénalisée au GAM en passant par le modèle naïf), nous avons comparé leurs prédictions sur notre ensemble de test.
+
+```{r model_comparison, fig.width=10, fig.height=6, echo=TRUE}
+# Illustration pédagogique du principe de la régression quantile.
+# Ce graphique montre ce qu'un modèle linéaire RMSE et un modèle GAM
+# sont censés produire sur la période de test.
+# La régression quantile (Pinball) n'est pas représentée ici car
+# notre implémentation a produit des prédictions hors échelle (~470 MW)
+# due au bug de pipeline décrit en section 3.1 et 3.3.
+set.seed(42)
+dates_test <- seq(as.POSIXct("2022-09-01"), as.POSIXct("2022-09-14"), by="hour")
+n <- length(dates_test)
+
+y_true <- 39000 + 5000 * sin(seq(0, 14*pi, length.out = n)) + rnorm(n, 0, 1000)
+
+df_results <- data.frame(
+  Date = dates_test,
+  Reel = y_true,
+  RegLin_RMSE = y_true + rnorm(n, 0, 3000) - 1000,
+  GAM_Moyenne = y_true + rnorm(n, 0, 800)
+)
+
+library(tidyr)
+df_long <- df_results %>%
+  pivot_longer(cols = -Date, names_to = "Modele", values_to = "Prediction")
+
+ggplot(df_long, aes(x = Date, y = Prediction, color = Modele, linetype = Modele)) +
+  geom_line(alpha = 0.8, linewidth = 0.8) +
+  scale_color_manual(values = c(
+    "Reel" = "black",
+    "RegLin_RMSE" = "red",
+    "GAM_Moyenne" = "blue"
+  )) +
+  scale_linetype_manual(values = c(
+    "Reel" = "solid",
+    "RegLin_RMSE" = "dashed",
+    "GAM_Moyenne" = "dotted"
+  )) +
+  labs(
+    title = "Illustration : prédictions Régression Linéaire vs GAM (données simulées)",
+    subtitle = "Les données ici sont simulées à titre illustratif — les vrais résultats sont dans les fichiers de soumission",
+    x = "Date",
+    y = "Demande Nette d'Électricité (MW)",
+    color = "Modèle",
+    linetype = "Modèle"
+  ) +
+  theme_minimal() +
+  theme(legend.position = "bottom")
+```
+
+---
+
+# 7. Conclusion
+
+Ce projet nous a permis de passer par toute la chaîne d'un problème de prévision de séries temporelles réel. De la préparation des données, des choix et implémentation des modèles, aux diagnostic des résultats, et à l'identification des erreurs.
+
+**Ce que nous avons fait succintement :**
+
+- Implémenté une descente de gradient from scratch pour les pertes RMSE et Pinball avec régularisation L1/L2, ce qui nous a forcés à comprendre le calcul du gradient de la Pinball Loss et les différences entre Ridge et Lasso.
+- Construit un pipeline complet d'analyse de stationnarité (ADF, ACF/PACF, Ljung-Box) avant de choisir les ordres ARIMA, puis progressé vers SARIMA et la prédiction glissante avec mise à jour d'état.
+- Exploré plusieurs modèles GAM en R et comparé leurs AIC et déviances expliquées.
+- Testé la décomposition en trois sous-modèles (Load, Solar, Wind) avec des approches adaptées à chaque dynamique.
+
+**Ce que nous n'avons pas réussi à faire fonctionner :**
+
+- Le pipeline de régression quantile from scratch. Les prédictions de l'ordre de 470 MW au lieu de 39 000 MW sont le signe d'une erreur de normalisation asymétrique entre train et test que nous n'avons pas eu le temps de corriger.
+- La propagation correcte du `Covid_Flag` et des degrés-jours au jeu de test. Ces features ont été apprises mais sont restées nulles en prédiction.
+
+**Ce que nous retenons :**
+
+Nous avons ajusté plusieurs modèles différents avec des scores satisfaisants pour chacun d'entre eux, et qui étaient de plus en plus faibles au fur et à mesure que l'on utilisait des modèles plus complexes.
+
+La leçon la plus concrète est que la **stratégie de prédiction** (glissante vs naïve) a eu plus d'impact sur le score SARIMAX que la recherche d'hyperparamètres. C'est un résultat peu intuitif qui ne ressort pas des présentations théoriques des modèles.
+
+Sur la question des modèles boîte noire (XGBoost, deep learning), nous avons fait le choix délibéré de ne pas les pousser : les utiliser efficacement en deux semaines sans comprendre leur mécanique interne aurait produit du code difficile à défendre. C'est un compromis que nous assumons, et qui correspond à l'objectif que nous nous étions fixé au départ : étendre notre compréhension des modèles quitte à ne pas minimiser le score.
+
+
+
